@@ -17,6 +17,9 @@ Branch YARN-2928: Timeline Server Next Generation: Phase 1
 
   IMPROVEMENTS
 
+    MAPREDUCE-6546. reconcile the two versions of the timeline service
+    performance tests. (Sangjin Lee via Naganarasimha G R)
+
   OPTIMIZATIONS
 
   BUG FIXES
