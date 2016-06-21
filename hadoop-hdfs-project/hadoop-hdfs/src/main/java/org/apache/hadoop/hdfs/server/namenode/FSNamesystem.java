@@ -76,6 +76,10 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RETRY_CACHE_EXPI
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RETRY_CACHE_HEAP_PERCENT_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RETRY_CACHE_HEAP_PERCENT_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LEASE_RECHECK_INTERVAL_MS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LEASE_RECHECK_INTERVAL_MS_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_MAX_LOCK_HOLD_TO_RELEASE_LEASE_MS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_MAX_LOCK_HOLD_TO_RELEASE_LEASE_MS_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_SUPERUSERGROUP_DEFAULT;
@@ -116,6 +120,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -134,6 +140,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.crypto.key.KeyProvider.Metadata;
 import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
+import org.apache.hadoop.hdfs.AddBlockFlag;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedListEntries;
 import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.ContentSummary;
@@ -182,7 +189,6 @@ import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
-import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
 import org.apache.hadoop.hdfs.protocol.RecoveryInProgressException;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeException;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
@@ -283,6 +289,7 @@ import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * FSNamesystem is a container of both transient
@@ -382,7 +389,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   private final UserGroupInformation fsOwner;
   private final String supergroup;
   private final boolean standbyShouldCheckpoint;
-  
+
+  /** Interval between each check of lease to release. */
+  private final long leaseRecheckIntervalMs;
+  /** Maximum time the lock is hold to release lease. */
+  private final long maxLockHoldToReleaseLeaseMs;
+
   // Scan interval is not configurable.
   private static final long DELEGATION_TOKEN_REMOVER_SCAN_INTERVAL =
     TimeUnit.MILLISECONDS.convert(1, TimeUnit.HOURS);
@@ -425,6 +437,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   // A daemon to periodically clean up corrupt lazyPersist files
   // from the name space.
   Daemon lazyPersistFileScrubber = null;
+
+  // Executor to warm up EDEK cache
+  private ExecutorService edekCacheLoader = null;
+  private final int edekCacheLoaderDelay;
+  private final int edekCacheLoaderInterval;
+
   /**
    * When an active namenode will roll its own edit log, in # edits
    */
@@ -787,6 +805,20 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
                 + " must be zero (for disable) or greater than zero.");
       }
 
+      this.edekCacheLoaderDelay = conf.getInt(
+          DFSConfigKeys.DFS_NAMENODE_EDEKCACHELOADER_INITIAL_DELAY_MS_KEY,
+          DFSConfigKeys.DFS_NAMENODE_EDEKCACHELOADER_INITIAL_DELAY_MS_DEFAULT);
+      this.edekCacheLoaderInterval = conf.getInt(
+          DFSConfigKeys.DFS_NAMENODE_EDEKCACHELOADER_INTERVAL_MS_KEY,
+          DFSConfigKeys.DFS_NAMENODE_EDEKCACHELOADER_INTERVAL_MS_DEFAULT);
+
+      this.leaseRecheckIntervalMs = conf.getLong(
+          DFS_NAMENODE_LEASE_RECHECK_INTERVAL_MS_KEY,
+          DFS_NAMENODE_LEASE_RECHECK_INTERVAL_MS_DEFAULT);
+      this.maxLockHoldToReleaseLeaseMs = conf.getLong(
+          DFS_NAMENODE_MAX_LOCK_HOLD_TO_RELEASE_LEASE_MS_KEY,
+          DFS_NAMENODE_MAX_LOCK_HOLD_TO_RELEASE_LEASE_MS_DEFAULT);
+
       // For testing purposes, allow the DT secret manager to be started regardless
       // of whether security is enabled.
       alwaysUseDelegationTokensForTests = conf.getBoolean(
@@ -829,6 +861,16 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   @VisibleForTesting
   public RetryCache getRetryCache() {
     return retryCache;
+  }
+
+  @VisibleForTesting
+  public long getLeaseRecheckIntervalMs() {
+    return leaseRecheckIntervalMs;
+  }
+
+  @VisibleForTesting
+  public long getMaxLockHoldToReleaseLeaseMs() {
+    return maxLockHoldToReleaseLeaseMs;
   }
 
   void lockRetryCache() {
@@ -885,6 +927,36 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           entryExpiryNanos);
     }
     return null;
+  }
+
+  /**
+   * Locate DefaultAuditLogger, if any, to enable/disable CallerContext.
+   *
+   * @param value
+   *          true, enable CallerContext, otherwise false to disable it.
+   */
+  void setCallerContextEnabled(final boolean value) {
+    for (AuditLogger logger : auditLoggers) {
+      if (logger instanceof DefaultAuditLogger) {
+        ((DefaultAuditLogger) logger).setCallerContextEnabled(value);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Get the value indicating if CallerContext is enabled.
+   *
+   * @return true, if CallerContext is enabled, otherwise false, if it's
+   *         disabled.
+   */
+  boolean getCallerContextEnabled() {
+    for (AuditLogger logger : auditLoggers) {
+      if (logger instanceof DefaultAuditLogger) {
+        return ((DefaultAuditLogger) logger).getCallerContextEnabled();
+      }
+    }
+    return false;
   }
 
   private List<AuditLogger> initAuditLoggers(Configuration conf) {
@@ -1128,8 +1200,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
       cacheManager.startMonitorThread();
       blockManager.getDatanodeManager().setShouldSendCachingCommands(true);
+      if (provider != null) {
+        edekCacheLoader = Executors.newSingleThreadExecutor(
+            new ThreadFactoryBuilder().setDaemon(true)
+                .setNameFormat("Warm Up EDEK Cache Thread #%d")
+                .build());
+        FSDirEncryptionZoneOp.warmUpEdekCache(edekCacheLoader, dir,
+            edekCacheLoaderDelay, edekCacheLoaderInterval);
+      }
     } finally {
       startingActiveService = false;
+      blockManager.checkSafeMode();
       writeUnlock();
     }
   }
@@ -1161,6 +1242,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       if (nnrmthread != null) {
         ((NameNodeResourceMonitor) nnrmthread.getRunnable()).stopMonitor();
         nnrmthread.interrupt();
+      }
+      if (edekCacheLoader != null) {
+        edekCacheLoader.shutdownNow();
       }
       if (nnEditLogRoller != null) {
         ((NameNodeEditLogRoller)nnEditLogRoller.getRunnable()).stop();
@@ -1751,25 +1835,28 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }
 
     LocatedBlocks blocks = res.blocks;
+    sortLocatedBlocks(clientMachine, blocks);
+    return blocks;
+  }
+
+  private void sortLocatedBlocks(String clientMachine, LocatedBlocks blocks) {
     if (blocks != null) {
       List<LocatedBlock> blkList = blocks.getLocatedBlocks();
-      if (blkList == null || blkList.size() == 0 ||
-          blkList.get(0) instanceof LocatedStripedBlock) {
-        // no need to sort locations for striped blocks
-        return blocks;
+      if (blkList == null || blkList.size() == 0) {
+        // simply return, block list is empty
+        return;
       }
-      blockManager.getDatanodeManager().sortLocatedBlocks(
-          clientMachine, blkList);
+      blockManager.getDatanodeManager().sortLocatedBlocks(clientMachine,
+          blkList);
 
       // lastBlock is not part of getLocatedBlocks(), might need to sort it too
       LocatedBlock lastBlock = blocks.getLastLocatedBlock();
       if (lastBlock != null) {
         ArrayList<LocatedBlock> lastBlockList = Lists.newArrayList(lastBlock);
-        blockManager.getDatanodeManager().sortLocatedBlocks(
-            clientMachine, lastBlockList);
+        blockManager.getDatanodeManager().sortLocatedBlocks(clientMachine,
+            lastBlockList);
       }
     }
-    return blocks;
   }
 
   /**
@@ -2408,7 +2495,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    */
   LocatedBlock getAdditionalBlock(
       String src, long fileId, String clientName, ExtendedBlock previous,
-      DatanodeInfo[] excludedNodes, String[] favoredNodes) throws IOException {
+      DatanodeInfo[] excludedNodes, String[] favoredNodes,
+      EnumSet<AddBlockFlag> flags) throws IOException {
     NameNode.stateChangeLog.debug("BLOCK* getAdditionalBlock: {}  inodeId {}" +
         " for {}", src, fileId, clientName);
 
@@ -2432,7 +2520,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     }
 
     DatanodeStorageInfo[] targets = FSDirWriteFileOp.chooseTargetForNewBlock(
-        blockManager, src, excludedNodes, favoredNodes, r);
+        blockManager, src, excludedNodes, favoredNodes, flags, r);
 
     checkOperation(OperationCategory.WRITE);
     writeLock();
@@ -3054,9 +3142,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     if(nrCompleteBlocks == nrBlocks) {
       finalizeINodeFileUnderConstruction(src, pendingFile,
           iip.getLatestSnapshotId(), false);
-      NameNode.stateChangeLog.warn("BLOCK*"
-        + " internalReleaseLease: All existing blocks are COMPLETE,"
-        + " lease removed, file closed.");
+      NameNode.stateChangeLog.warn("BLOCK*" +
+          " internalReleaseLease: All existing blocks are COMPLETE," +
+          " lease removed, file " + src + " closed.");
       return true;  // closed!
     }
 
@@ -3093,9 +3181,9 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           blockManager.hasMinStorage(lastBlock)) {
         finalizeINodeFileUnderConstruction(src, pendingFile,
             iip.getLatestSnapshotId(), false);
-        NameNode.stateChangeLog.warn("BLOCK*"
-          + " internalReleaseLease: Committed blocks are minimally replicated,"
-          + " lease removed, file closed.");
+        NameNode.stateChangeLog.warn("BLOCK*" +
+            " internalReleaseLease: Committed blocks are minimally" +
+            " replicated, lease removed, file" + src + " closed.");
         return true;  // closed!
       }
       // Cannot close file right now, since some blocks 
@@ -3138,7 +3226,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         finalizeINodeFileUnderConstruction(src, pendingFile,
             iip.getLatestSnapshotId(), false);
         NameNode.stateChangeLog.warn("BLOCK* internalReleaseLease: "
-            + "Removed empty last block and closed file.");
+            + "Removed empty last block and closed file " + src);
         return true;
       }
       // start recovery of the last block for this file
@@ -3260,7 +3348,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
     // close file and persist block allocations for this file
     closeFile(src, pendingFile);
 
-    blockManager.checkReplication(pendingFile);
+    blockManager.checkRedundancy(pendingFile);
   }
 
   @VisibleForTesting
@@ -3834,14 +3922,17 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
                   .debug("Namenode is in safemode, skipping scrubbing of corrupted lazy-persist files.");
             }
           }
+        } catch (Exception e) {
+          FSNamesystem.LOG.error(
+              "Ignoring exception in LazyPersistFileScrubber:", e);
+        }
+
+        try {
           Thread.sleep(scrubIntervalSec * 1000);
         } catch (InterruptedException e) {
           FSNamesystem.LOG.info(
               "LazyPersistFileScrubber was interrupted, exiting");
           break;
-        } catch (Exception e) {
-          FSNamesystem.LOG.error(
-              "Ignoring exception in LazyPersistFileScrubber:", e);
         }
       }
     }
@@ -4251,10 +4342,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       setManualAndResourceLowSafeMode(!resourcesLow, resourcesLow);
       NameNode.stateChangeLog.info("STATE* Safe mode is ON.\n" +
           getSafeModeTip());
-      if (isEditlogOpenForWrite) {
-        getEditLog().logSyncAll();
-      }
-      NameNode.stateChangeLog.info("STATE* Safe mode is ON" + getSafeModeTip());
     } finally {
       writeUnlock();
     }
@@ -4410,7 +4497,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   @Override // FSNamesystemMBean
   @Metric
   public long getPendingReplicationBlocks() {
-    return blockManager.getPendingReplicationBlocksCount();
+    return blockManager.getPendingReconstructionBlocksCount();
   }
 
   @Override // FSNamesystemMBean
@@ -4445,6 +4532,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   @Metric
   public long getExcessBlocks() {
     return blockManager.getExcessBlocksCount();
+  }
+
+  @Metric
+  public long getNumTimedOutPendingReconstructions() {
+    return blockManager.getNumTimedOutPendingReconstructions();
   }
   
   // HA-only metric
@@ -4737,7 +4829,6 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    */
   void reportBadBlocks(LocatedBlock[] blocks) throws IOException {
     checkOperation(OperationCategory.WRITE);
-    NameNode.stateChangeLog.info("*DIR* reportBadBlocks");
     writeLock();
     try {
       checkOperation(OperationCategory.WRITE);
@@ -4746,6 +4837,8 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
         DatanodeInfo[] nodes = blocks[i].getLocations();
         String[] storageIDs = blocks[i].getStorageIDs();
         for (int j = 0; j < nodes.length; j++) {
+          NameNode.stateChangeLog.info("*DIR* reportBadBlocks for block: {} on"
+              + " datanode: {}", blk, nodes[j].getXferAddr());
           blockManager.findAndMarkBlockAsCorrupt(blk, nodes[j],
               storageIDs == null ? null: storageIDs[j], 
               "client machine reported it");
@@ -6822,12 +6915,32 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
           }
         };
 
-    private boolean isCallerContextEnabled;
+    private volatile boolean isCallerContextEnabled;
     private int callerContextMaxLen;
     private int callerSignatureMaxLen;
 
     private boolean logTokenTrackingId;
     private Set<String> debugCmdSet = new HashSet<String>();
+
+    /**
+     * Enable or disable CallerContext.
+     *
+     * @param value
+     *          true, enable CallerContext, otherwise false to disable it.
+     */
+    void setCallerContextEnabled(final boolean value) {
+      isCallerContextEnabled = value;
+    }
+
+    /**
+     * Get the value indicating if CallerContext is enabled.
+     *
+     * @return true, if CallerContext is enabled, otherwise false, if it's
+     *         disabled.
+     */
+    boolean getCallerContextEnabled() {
+      return isCallerContextEnabled;
+    }
 
     @Override
     public void initialize(Configuration conf) {

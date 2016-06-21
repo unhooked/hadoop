@@ -103,7 +103,7 @@ public class UserGroupInformation {
    * @param immediate true if we should login without waiting for ticket window
    */
   @VisibleForTesting
-  static void setShouldRenewImmediatelyForTests(boolean immediate) {
+  public static void setShouldRenewImmediatelyForTests(boolean immediate) {
     shouldRenewImmediatelyForTests = immediate;
   }
 
@@ -124,6 +124,10 @@ public class UserGroupInformation {
 
     static UgiMetrics create() {
       return DefaultMetricsSystem.instance().register(new UgiMetrics());
+    }
+
+    static void reattach() {
+      metrics = UgiMetrics.create();
     }
 
     void addGetGroups(long latency) {
@@ -236,6 +240,13 @@ public class UserGroupInformation {
       }
       return true;
     }
+  }
+
+  /**
+   * Reattach the class's metrics to a new metric system.
+   */
+  public static void reattachMetrics() {
+    UgiMetrics.reattach();
   }
 
   /** Metrics to track UGI activity */
@@ -1602,9 +1613,11 @@ public class UserGroupInformation {
       return result.toArray(new String[result.size()]);
     } catch (IOException ie) {
       if (LOG.isDebugEnabled()) {
-        LOG.debug("No groups available for user " + getShortUserName());
+        LOG.debug("Failed to get groups for user " + getShortUserName()
+            + " by " + ie);
+        LOG.trace("TRACE", ie);
       }
-      return new String[0];
+      return StringUtils.emptyStringArray;
     }
   }
   

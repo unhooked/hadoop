@@ -1268,6 +1268,15 @@ public class DataNode extends ReconfigurableBase
     LOG.info("Starting DataNode with maxLockedMemory = " +
         dnConf.maxLockedMemory);
 
+    int volFailuresTolerated = dnConf.getVolFailuresTolerated();
+    int volsConfigured = dnConf.getVolsConfigured();
+    if (volFailuresTolerated < 0 || volFailuresTolerated >= volsConfigured) {
+      throw new DiskErrorException("Invalid value configured for "
+          + "dfs.datanode.failed.volumes.tolerated - " + volFailuresTolerated
+          + ". Value configured is either less than 0 or >= "
+          + "to the number of configured volumes (" + volsConfigured + ").");
+    }
+
     storage = new DataStorage();
     
     // global DN settings
@@ -1708,7 +1717,8 @@ public class DataNode extends ReconfigurableBase
       throw new AccessControlException(
           "Can't continue with getBlockLocalPathInfo() "
               + "authorization. The user " + currentUser
-              + " is not allowed to call getBlockLocalPathInfo");
+              + " is not configured in "
+              + DFSConfigKeys.DFS_BLOCK_LOCAL_PATH_ACCESS_USER_KEY);
     }
   }
 
@@ -2971,6 +2981,13 @@ public class DataNode extends ReconfigurableBase
 
     shutdownThread.setDaemon(true);
     shutdownThread.start();
+  }
+
+  @Override //ClientDatanodeProtocol
+  public void evictWriters() throws IOException {
+    checkSuperuserPrivilege();
+    LOG.info("Evicting all writers.");
+    xserver.stopWriters();
   }
 
   @Override //ClientDatanodeProtocol

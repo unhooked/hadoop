@@ -86,7 +86,14 @@ public class ApplicationHistoryServer extends CompositeService {
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
-    // init timeline services first
+
+    // do security login first.
+    try {
+      doSecureLogin(conf);
+    } catch(IOException ie) {
+      throw new YarnRuntimeException("Failed to login", ie);
+    }
+    // init timeline services
     timelineStore = createTimelineStore(conf);
     addIfService(timelineStore);
     secretManagerService = createTimelineDelegationTokenSecretManagerService(conf);
@@ -111,12 +118,6 @@ public class ApplicationHistoryServer extends CompositeService {
 
   @Override
   protected void serviceStart() throws Exception {
-    try {
-      doSecureLogin(getConfig());
-    } catch(IOException ie) {
-      throw new YarnRuntimeException("Failed to login", ie);
-    }
-
     super.serviceStart();
     startWebApp();
   }
@@ -307,6 +308,7 @@ public class ApplicationHistoryServer extends CompositeService {
               .withAttribute(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
                  conf.get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS))
               .withCSRFProtection(YarnConfiguration.TIMELINE_CSRF_PREFIX)
+              .withXFSProtection(YarnConfiguration.TIMELINE_XFS_PREFIX)
               .at(bindAddress).build(ahsWebApp);
        HttpServer2 httpServer = webApp.httpServer();
 

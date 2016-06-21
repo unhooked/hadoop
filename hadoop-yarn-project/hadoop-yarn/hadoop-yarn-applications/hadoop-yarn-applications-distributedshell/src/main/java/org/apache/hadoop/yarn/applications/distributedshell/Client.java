@@ -68,6 +68,7 @@ import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.URL;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineDomain;
@@ -127,7 +128,7 @@ public class Client {
   // Queue for App master
   private String amQueue = "";
   // Amt. of memory resource to request for to run the App Master
-  private int amMemory = 10; 
+  private long amMemory = 10;
   // Amt. of virtual core resource to request for to run the App Master
   private int amVCores = 1;
 
@@ -168,6 +169,8 @@ public class Client {
   private boolean keepContainers = false;
 
   private long attemptFailuresValidityInterval = -1;
+
+  private Vector<CharSequence> containerRetryOptions = new Vector<>(5);
 
   // Debug flag
   boolean debugFlag = false;
@@ -288,6 +291,18 @@ public class Client {
             + " will be allocated, \"\" means containers"
             + " can be allocated anywhere, if you don't specify the option,"
             + " default node_label_expression of queue will be used.");
+    opts.addOption("container_retry_policy", true,
+        "Retry policy when container fails to run, "
+            + "0: NEVER_RETRY, 1: RETRY_ON_ALL_ERRORS, "
+            + "2: RETRY_ON_SPECIFIC_ERROR_CODES");
+    opts.addOption("container_retry_error_codes", true,
+        "When retry policy is set to RETRY_ON_SPECIFIC_ERROR_CODES, error "
+            + "codes is specified with this option, "
+            + "e.g. --container_retry_error_codes 1,2,3");
+    opts.addOption("container_max_retries", true,
+        "If container could retry, it specifies max retires");
+    opts.addOption("container_retry_interval", true,
+        "Interval between each retry, unit is milliseconds");
   }
 
   /**
@@ -430,6 +445,24 @@ public class Client {
       }
     }
 
+    // Get container retry options
+    if (cliParser.hasOption("container_retry_policy")) {
+      containerRetryOptions.add("--container_retry_policy "
+          + cliParser.getOptionValue("container_retry_policy"));
+    }
+    if (cliParser.hasOption("container_retry_error_codes")) {
+      containerRetryOptions.add("--container_retry_error_codes "
+          + cliParser.getOptionValue("container_retry_error_codes"));
+    }
+    if (cliParser.hasOption("container_max_retries")) {
+      containerRetryOptions.add("--container_max_retries "
+          + cliParser.getOptionValue("container_max_retries"));
+    }
+    if (cliParser.hasOption("container_retry_interval")) {
+      containerRetryOptions.add("--container_retry_interval "
+          + cliParser.getOptionValue("container_retry_interval"));
+    }
+
     return true;
   }
 
@@ -488,7 +521,7 @@ public class Client {
     // the required resources from the RM for the app master
     // Memory ask has to be a multiple of min and less than max. 
     // Dump out information about cluster capability as seen by the resource manager
-    int maxMem = appResponse.getMaximumResourceCapability().getMemory();
+    long maxMem = appResponse.getMaximumResourceCapability().getMemorySize();
     LOG.info("Max mem capability of resources in this cluster " + maxMem);
 
     // A resource ask cannot exceed the max. 
@@ -638,6 +671,8 @@ public class Client {
     if (debugFlag) {
       vargs.add("--debug");
     }
+
+    vargs.addAll(containerRetryOptions);
 
     vargs.add("1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stdout");
     vargs.add("2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stderr");
@@ -823,7 +858,7 @@ public class Client {
     FileStatus scFileStatus = fs.getFileStatus(dst);
     LocalResource scRsrc =
         LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromURI(dst.toUri()),
+            URL.fromURI(dst.toUri()),
             LocalResourceType.FILE, LocalResourceVisibility.APPLICATION,
             scFileStatus.getLen(), scFileStatus.getModificationTime());
     localResources.put(fileDstPath, scRsrc);

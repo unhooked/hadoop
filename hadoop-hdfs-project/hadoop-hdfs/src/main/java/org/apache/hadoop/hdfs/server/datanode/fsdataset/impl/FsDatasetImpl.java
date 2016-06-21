@@ -50,6 +50,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
@@ -78,6 +79,7 @@ import org.apache.hadoop.hdfs.server.datanode.ReplicaAlreadyExistsException;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaBeingWritten;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaHandler;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipeline;
+import org.apache.hadoop.hdfs.server.datanode.ReplicaInPipelineInterface;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaInfo;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaNotFoundException;
 import org.apache.hadoop.hdfs.server.datanode.ReplicaUnderRecovery;
@@ -255,6 +257,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   final LocalFileSystem localFS;
 
   private boolean blockPinningEnabled;
+  private final int maxDataLength;
   
   /**
    * An FSDataset has a directory where it loads its data files.
@@ -268,24 +271,15 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     this.smallBufferSize = DFSUtilClient.getSmallBufferSize(conf);
     // The number of volumes required for operation is the total number
     // of volumes minus the number of failed volumes we can tolerate.
-    volFailuresTolerated =
-      conf.getInt(DFSConfigKeys.DFS_DATANODE_FAILED_VOLUMES_TOLERATED_KEY,
-                  DFSConfigKeys.DFS_DATANODE_FAILED_VOLUMES_TOLERATED_DEFAULT);
+    volFailuresTolerated = datanode.getDnConf().getVolFailuresTolerated();
 
-    String[] dataDirs = conf.getTrimmedStrings(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY);
     Collection<StorageLocation> dataLocations = DataNode.getStorageLocations(conf);
     List<VolumeFailureInfo> volumeFailureInfos = getInitialVolumeFailureInfos(
         dataLocations, storage);
 
-    int volsConfigured = (dataDirs == null) ? 0 : dataDirs.length;
+    int volsConfigured = datanode.getDnConf().getVolsConfigured();
     int volsFailed = volumeFailureInfos.size();
 
-    if (volFailuresTolerated < 0 || volFailuresTolerated >= volsConfigured) {
-      throw new DiskErrorException("Invalid value configured for "
-          + "dfs.datanode.failed.volumes.tolerated - " + volFailuresTolerated
-          + ". Value configured is either less than 0 or >= "
-          + "to the number of configured volumes (" + volsConfigured + ").");
-    }
     if (volsFailed > volFailuresTolerated) {
       throw new DiskErrorException("Too many failed volumes - "
           + "current valid volumes: " + storage.getNumStorageDirs() 
@@ -342,6 +336,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     blockPinningEnabled = conf.getBoolean(
       DFSConfigKeys.DFS_DATANODE_BLOCK_PINNING_ENABLED,
       DFSConfigKeys.DFS_DATANODE_BLOCK_PINNING_ENABLED_DEFAULT);
+    maxDataLength = conf.getInt(
+        CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH,
+        CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH_DEFAULT);
   }
 
   /**
@@ -1159,7 +1156,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     // construct a RBW replica with the new GS
     File blkfile = replicaInfo.getBlockFile();
     FsVolumeImpl v = (FsVolumeImpl)replicaInfo.getVolume();
-    if (v.getAvailable() < estimateBlockLen - replicaInfo.getNumBytes()) {
+    long bytesReserved = estimateBlockLen - replicaInfo.getNumBytes();
+    if (v.getAvailable() < bytesReserved) {
       throw new DiskOutOfSpaceException("Insufficient space for appending to "
           + replicaInfo);
     }
@@ -1167,7 +1165,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     File oldmeta = replicaInfo.getMetaFile();
     ReplicaBeingWritten newReplicaInfo = new ReplicaBeingWritten(
         replicaInfo.getBlockId(), replicaInfo.getNumBytes(), newGS,
-        v, newBlkFile.getParentFile(), Thread.currentThread(), estimateBlockLen);
+        v, newBlkFile.getParentFile(), Thread.currentThread(), bytesReserved);
     File newmeta = newReplicaInfo.getMetaFile();
 
     // rename meta file to rbw directory
@@ -1203,12 +1201,24 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     
     // Replace finalized replica by a RBW replica in replicas map
     volumeMap.add(bpid, newReplicaInfo);
-    v.reserveSpaceForReplica(estimateBlockLen - replicaInfo.getNumBytes());
+    v.reserveSpaceForReplica(bytesReserved);
     return newReplicaInfo;
   }
 
+  private static class MustStopExistingWriter extends Exception {
+    private final ReplicaInPipeline rip;
+
+    MustStopExistingWriter(ReplicaInPipeline rip) {
+      this.rip = rip;
+    }
+
+    ReplicaInPipeline getReplica() {
+      return rip;
+    }
+  }
+
   private ReplicaInfo recoverCheck(ExtendedBlock b, long newGS, 
-      long expectedBlockLen) throws IOException {
+      long expectedBlockLen) throws IOException, MustStopExistingWriter {
     ReplicaInfo replicaInfo = getReplicaInfo(b.getBlockPoolId(), b.getBlockId());
     
     // check state
@@ -1232,9 +1242,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     long replicaLen = replicaInfo.getNumBytes();
     if (replicaInfo.getState() == ReplicaState.RBW) {
       ReplicaBeingWritten rbw = (ReplicaBeingWritten)replicaInfo;
-      // kill the previous writer
-      rbw.stopWriter(datanode.getDnConf().getXceiverStopTimeout());
-      rbw.setWriter(Thread.currentThread());
+      if (!rbw.attemptToSetWriter(null, Thread.currentThread())) {
+        throw new MustStopExistingWriter(rbw);
+      }
       // check length: bytesRcvd, bytesOnDisk, and bytesAcked should be the same
       if (replicaLen != rbw.getBytesOnDisk() 
           || replicaLen != rbw.getBytesAcked()) {
@@ -1256,43 +1266,59 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
 
   @Override  // FsDatasetSpi
-  public synchronized ReplicaHandler recoverAppend(
+  public ReplicaHandler recoverAppend(
       ExtendedBlock b, long newGS, long expectedBlockLen) throws IOException {
     LOG.info("Recover failed append to " + b);
 
-    ReplicaInfo replicaInfo = recoverCheck(b, newGS, expectedBlockLen);
+    while (true) {
+      try {
+        synchronized (this) {
+          ReplicaInfo replicaInfo = recoverCheck(b, newGS, expectedBlockLen);
 
-    FsVolumeReference ref = replicaInfo.getVolume().obtainReference();
-    ReplicaBeingWritten replica;
-    try {
-      // change the replica's state/gs etc.
-      if (replicaInfo.getState() == ReplicaState.FINALIZED) {
-        replica = append(b.getBlockPoolId(), (FinalizedReplica) replicaInfo,
-                         newGS, b.getNumBytes());
-      } else { //RBW
-        bumpReplicaGS(replicaInfo, newGS);
-        replica = (ReplicaBeingWritten) replicaInfo;
+          FsVolumeReference ref = replicaInfo.getVolume().obtainReference();
+          ReplicaBeingWritten replica;
+          try {
+            // change the replica's state/gs etc.
+            if (replicaInfo.getState() == ReplicaState.FINALIZED) {
+              replica = append(b.getBlockPoolId(), (FinalizedReplica) replicaInfo,
+                               newGS, b.getNumBytes());
+            } else { //RBW
+              bumpReplicaGS(replicaInfo, newGS);
+              replica = (ReplicaBeingWritten) replicaInfo;
+            }
+          } catch (IOException e) {
+            IOUtils.cleanup(null, ref);
+            throw e;
+          }
+          return new ReplicaHandler(replica, ref);
+        }
+      } catch (MustStopExistingWriter e) {
+        e.getReplica().stopWriter(datanode.getDnConf().getXceiverStopTimeout());
       }
-    } catch (IOException e) {
-      IOUtils.cleanup(null, ref);
-      throw e;
     }
-    return new ReplicaHandler(replica, ref);
   }
 
   @Override // FsDatasetSpi
-  public synchronized Replica recoverClose(ExtendedBlock b, long newGS,
+  public Replica recoverClose(ExtendedBlock b, long newGS,
       long expectedBlockLen) throws IOException {
     LOG.info("Recover failed close " + b);
-    // check replica's state
-    ReplicaInfo replicaInfo = recoverCheck(b, newGS, expectedBlockLen);
-    // bump the replica's GS
-    bumpReplicaGS(replicaInfo, newGS);
-    // finalize the replica if RBW
-    if (replicaInfo.getState() == ReplicaState.RBW) {
-      finalizeReplica(b.getBlockPoolId(), replicaInfo);
+    while (true) {
+      try {
+        synchronized (this) {
+          // check replica's state
+          ReplicaInfo replicaInfo = recoverCheck(b, newGS, expectedBlockLen);
+          // bump the replica's GS
+          bumpReplicaGS(replicaInfo, newGS);
+          // finalize the replica if RBW
+          if (replicaInfo.getState() == ReplicaState.RBW) {
+            finalizeReplica(b.getBlockPoolId(), replicaInfo);
+          }
+          return replicaInfo;
+        }
+      } catch (MustStopExistingWriter e) {
+        e.getReplica().stopWriter(datanode.getDnConf().getXceiverStopTimeout());
+      }
     }
-    return replicaInfo;
   }
   
   /**
@@ -1384,26 +1410,37 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
 
   @Override // FsDatasetSpi
-  public synchronized ReplicaHandler recoverRbw(
+  public ReplicaHandler recoverRbw(
       ExtendedBlock b, long newGS, long minBytesRcvd, long maxBytesRcvd)
       throws IOException {
     LOG.info("Recover RBW replica " + b);
 
-    ReplicaInfo replicaInfo = getReplicaInfo(b.getBlockPoolId(), b.getBlockId());
-    
-    // check the replica's state
-    if (replicaInfo.getState() != ReplicaState.RBW) {
-      throw new ReplicaNotFoundException(
-          ReplicaNotFoundException.NON_RBW_REPLICA + replicaInfo);
+    while (true) {
+      try {
+        synchronized (this) {
+          ReplicaInfo replicaInfo = getReplicaInfo(b.getBlockPoolId(), b.getBlockId());
+          
+          // check the replica's state
+          if (replicaInfo.getState() != ReplicaState.RBW) {
+            throw new ReplicaNotFoundException(
+                ReplicaNotFoundException.NON_RBW_REPLICA + replicaInfo);
+          }
+          ReplicaBeingWritten rbw = (ReplicaBeingWritten)replicaInfo;
+          if (!rbw.attemptToSetWriter(null, Thread.currentThread())) {
+            throw new MustStopExistingWriter(rbw);
+          }
+          LOG.info("Recovering " + rbw);
+          return recoverRbwImpl(rbw, b, newGS, minBytesRcvd, maxBytesRcvd);
+        }
+      } catch (MustStopExistingWriter e) {
+        e.getReplica().stopWriter(datanode.getDnConf().getXceiverStopTimeout());
+      }
     }
-    ReplicaBeingWritten rbw = (ReplicaBeingWritten)replicaInfo;
-    
-    LOG.info("Recovering " + rbw);
+  }
 
-    // Stop the previous writer
-    rbw.stopWriter(datanode.getDnConf().getXceiverStopTimeout());
-    rbw.setWriter(Thread.currentThread());
-
+  private synchronized ReplicaHandler recoverRbwImpl(ReplicaBeingWritten rbw,
+      ExtendedBlock b, long newGS, long minBytesRcvd, long maxBytesRcvd)
+      throws IOException {
     // check generation stamp
     long replicaGenerationStamp = rbw.getGenerationStamp();
     if (replicaGenerationStamp < b.getGenerationStamp() ||
@@ -1419,7 +1456,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     long numBytes = rbw.getNumBytes();
     if (bytesAcked < minBytesRcvd || numBytes > maxBytesRcvd){
       throw new ReplicaNotFoundException("Unmatched length replica " + 
-          replicaInfo + ": BytesAcked = " + bytesAcked + 
+          rbw + ": BytesAcked = " + bytesAcked + 
           " BytesRcvd = " + numBytes + " are not in the range of [" + 
           minBytesRcvd + ", " + maxBytesRcvd + "].");
     }
@@ -1702,7 +1739,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
 
     List<FsVolumeImpl> curVolumes = volumes.getVolumes();
     for (FsVolumeSpi v : curVolumes) {
-      builders.put(v.getStorageID(), BlockListAsLongs.builder());
+      builders.put(v.getStorageID(), BlockListAsLongs.builder(maxDataLength));
     }
 
     synchronized(this) {
@@ -1918,6 +1955,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Block file " + removing.getBlockFile().getName()
               + " is to be deleted");
+        }
+        if (removing instanceof ReplicaInPipelineInterface) {
+          ((ReplicaInPipelineInterface) removing).releaseAllBytesReserved();
         }
       }
 
@@ -2351,8 +2391,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   }
 
   @Override // FsDatasetSpi
-  public synchronized ReplicaRecoveryInfo initReplicaRecovery(
-      RecoveringBlock rBlock) throws IOException {
+  public ReplicaRecoveryInfo initReplicaRecovery(RecoveringBlock rBlock)
+      throws IOException {
     return initReplicaRecovery(rBlock.getBlock().getBlockPoolId(), volumeMap,
         rBlock.getBlock().getLocalBlock(), rBlock.getNewGenerationStamp(),
         datanode.getDnConf().getXceiverStopTimeout());
@@ -2361,6 +2401,20 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   /** static version of {@link #initReplicaRecovery(RecoveringBlock)}. */
   static ReplicaRecoveryInfo initReplicaRecovery(String bpid, ReplicaMap map,
       Block block, long recoveryId, long xceiverStopTimeout) throws IOException {
+    while (true) {
+      try {
+        synchronized (map.getMutex()) {
+          return initReplicaRecoveryImpl(bpid, map, block, recoveryId);
+        }
+      } catch (MustStopExistingWriter e) {
+        e.getReplica().stopWriter(xceiverStopTimeout);
+      }
+    }
+  }
+
+  static ReplicaRecoveryInfo initReplicaRecoveryImpl(String bpid, ReplicaMap map,
+      Block block, long recoveryId)
+          throws IOException, MustStopExistingWriter {
     final ReplicaInfo replica = map.get(bpid, block.getBlockId());
     LOG.info("initReplicaRecovery: " + block + ", recoveryId=" + recoveryId
         + ", replica=" + replica);
@@ -2373,7 +2427,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     //stop writer if there is any
     if (replica instanceof ReplicaInPipeline) {
       final ReplicaInPipeline rip = (ReplicaInPipeline)replica;
-      rip.stopWriter(xceiverStopTimeout);
+      if (!rip.attemptToSetWriter(null, Thread.currentThread())) {
+        throw new MustStopExistingWriter(rip);
+      }
 
       //check replica bytes on disk.
       if (rip.getBytesOnDisk() < rip.getVisibleLength()) {

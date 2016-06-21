@@ -331,7 +331,7 @@ public class FSLeafQueue extends FSQueue {
       readLock.unlock();
     }
     for (FSAppAttempt sched : pendingForResourceApps) {
-      if (SchedulerAppUtils.isBlacklisted(sched, node, LOG)) {
+      if (SchedulerAppUtils.isPlaceBlacklisted(sched, node, LOG)) {
         continue;
       }
       assigned = sched.assignContainer(node);
@@ -481,8 +481,7 @@ public class FSLeafQueue extends FSQueue {
 
   /**
    * Check whether this queue can run this application master under the
-   * maxAMShare limit
-   *
+   * maxAMShare limit.
    * @param amResource
    * @return true if this queue can run
    */
@@ -492,10 +491,25 @@ public class FSLeafQueue extends FSQueue {
     if (Math.abs(maxAMShare - -1.0f) < 0.0001) {
       return true;
     }
-    Resource maxAMResource = Resources.multiply(getFairShare(), maxAMShare);
+
+    // If FairShare is zero, use min(maxShare, available resource) to compute
+    // maxAMResource
+    Resource maxResource = Resources.clone(getFairShare());
+    if (maxResource.getMemorySize() == 0) {
+      maxResource.setMemory(
+          Math.min(scheduler.getRootQueueMetrics().getAvailableMB(),
+                   getMaxShare().getMemorySize()));
+    }
+
+    if (maxResource.getVirtualCoresSize() == 0) {
+      maxResource.setVirtualCores(Math.min(
+          scheduler.getRootQueueMetrics().getAvailableVirtualCores(),
+          getMaxShare().getVirtualCoresSize()));
+    }
+
+    Resource maxAMResource = Resources.multiply(maxResource, maxAMShare);
     Resource ifRunAMResource = Resources.add(amResourceUsage, amResource);
-    return !policy
-        .checkIfAMResourceUsageOverLimit(ifRunAMResource, maxAMResource);
+    return Resources.fitsIn(ifRunAMResource, maxAMResource);
   }
 
   public void addAMResourceUsage(Resource amResource) {

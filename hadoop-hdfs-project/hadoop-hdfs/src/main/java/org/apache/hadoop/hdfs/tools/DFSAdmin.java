@@ -165,15 +165,15 @@ public class DFSAdmin extends FsShell {
     private static final String USAGE =
       "-"+NAME+" <quota> <dirname>...<dirname>";
     private static final String DESCRIPTION = 
-      "-setQuota <quota> <dirname>...<dirname>: " +
-      "Set the quota <quota> for each directory <dirName>.\n" + 
-      "\t\tThe directory quota is a long integer that puts a hard limit\n" +
-      "\t\ton the number of names in the directory tree\n" +
-      "\t\tFor each directory, attempt to set the quota. An error will be reported if\n" +
-      "\t\t1. N is not a positive integer, or\n" +
-      "\t\t2. User is not an administrator, or\n" +
-      "\t\t3. The directory does not exist or is a file.\n" +
-      "\t\tNote: A quota of 1 would force the directory to remain empty.\n";
+        "-setQuota <quota> <dirname>...<dirname>: " +
+        "Set the quota <quota> for each directory <dirName>.\n" +
+        "\t\tThe directory quota is a long integer that puts a hard limit\n" +
+        "\t\ton the number of names in the directory tree\n" +
+        "\t\tFor each directory, attempt to set the quota. An error will be reported if\n" +
+        "\t\t1. quota is not a positive integer, or\n" +
+        "\t\t2. User is not an administrator, or\n" +
+        "\t\t3. The directory does not exist or is a file.\n" +
+        "\t\tNote: A quota of 1 would force the directory to remain empty.\n";
 
     private final long quota; // the quota to be set
 
@@ -263,18 +263,18 @@ public class DFSAdmin extends FsShell {
     private static final String USAGE =
       "-"+NAME+" <quota> [-storageType <storagetype>] <dirname>...<dirname>";
     private static final String DESCRIPTION = USAGE + ": " +
-      "Set the space quota <quota> for each directory <dirName>.\n" +
-      "\t\tThe space quota is a long integer that puts a hard limit\n" +
-      "\t\ton the total size of all the files under the directory tree.\n" +
-      "\t\tThe extra space required for replication is also counted. E.g.\n" +
-      "\t\ta 1GB file with replication of 3 consumes 3GB of the quota.\n\n" +
-      "\t\tQuota can also be specified with a binary prefix for terabytes,\n" +
-      "\t\tpetabytes etc (e.g. 50t is 50TB, 5m is 5MB, 3p is 3PB).\n" + 
-      "\t\tFor each directory, attempt to set the quota. An error will be reported if\n" +
-      "\t\t1. N is not a positive integer, or\n" +
-      "\t\t2. user is not an administrator, or\n" +
-      "\t\t3. the directory does not exist or is a file.\n" +
-      "\t\tThe storage type specific quota is set when -storageType option is specified.\n";
+        "Set the space quota <quota> for each directory <dirName>.\n" +
+        "\t\tThe space quota is a long integer that puts a hard limit\n" +
+        "\t\ton the total size of all the files under the directory tree.\n" +
+        "\t\tThe extra space required for replication is also counted. E.g.\n" +
+        "\t\ta 1GB file with replication of 3 consumes 3GB of the quota.\n\n" +
+        "\t\tQuota can also be specified with a binary prefix for terabytes,\n" +
+        "\t\tpetabytes etc (e.g. 50t is 50TB, 5m is 5MB, 3p is 3PB).\n" +
+        "\t\tFor each directory, attempt to set the quota. An error will be reported if\n" +
+        "\t\t1. quota is not a positive integer or zero, or\n" +
+        "\t\t2. user is not an administrator, or\n" +
+        "\t\t3. the directory does not exist or is a file.\n" +
+        "\t\tThe storage type specific quota is set when -storageType option is specified.\n";
 
     private long quota; // the quota to be set
     private StorageType type;
@@ -427,6 +427,7 @@ public class DFSAdmin extends FsShell {
     "\t[-allowSnapshot <snapshotDir>]\n" +
     "\t[-disallowSnapshot <snapshotDir>]\n" +
     "\t[-shutdownDatanode <datanode_host:ipc_port> [upgrade]]\n" +
+    "\t[-evictWriters <datanode_host:ipc_port>]\n" +
     "\t[-getDatanodeInfo <datanode_host:ipc_port>]\n" +
     "\t[-metasave filename]\n" +
     "\t[-triggerBlockReport [-incremental] <datanode_host:ipc_port>]\n" +
@@ -1090,6 +1091,10 @@ public class DFSAdmin extends FsShell {
         + "\tclients will timeout and ignore the datanode. In such case, the\n"
         + "\tfast start-up mode will also be disabled.\n";
 
+    String evictWriters = "-evictWriters <datanode_host:ipc_port>\n"
+        + "\tMake the datanode evict all clients that are writing a block.\n"
+        + "\tThis is useful if decommissioning is hung due to slow writers.\n";
+
     String getDatanodeInfo = "-getDatanodeInfo <datanode_host:ipc_port>\n"
         + "\tGet the information about the given datanode. This command can\n"
         + "\tbe used for checking if a datanode is alive.\n";
@@ -1159,6 +1164,8 @@ public class DFSAdmin extends FsShell {
       System.out.println(disallowSnapshot);
     } else if ("shutdownDatanode".equalsIgnoreCase(cmd)) {
       System.out.println(shutdownDatanode);
+    } else if ("evictWriters".equalsIgnoreCase(cmd)) {
+      System.out.println(evictWriters);
     } else if ("getDatanodeInfo".equalsIgnoreCase(cmd)) {
       System.out.println(getDatanodeInfo);
     } else if ("help".equals(cmd)) {
@@ -1193,6 +1200,7 @@ public class DFSAdmin extends FsShell {
       System.out.println(allowSnapshot);
       System.out.println(disallowSnapshot);
       System.out.println(shutdownDatanode);
+      System.out.println(evictWriters);
       System.out.println(getDatanodeInfo);
       System.out.println(triggerBlockReport);
       System.out.println(help);
@@ -1822,6 +1830,9 @@ public class DFSAdmin extends FsShell {
     } else if ("-shutdownDatanode".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
           + " [-shutdownDatanode <datanode_host:ipc_port> [upgrade]]");
+    } else if ("-evictWriters".equals(cmd)) {
+      System.err.println("Usage: hdfs dfsadmin"
+          + " [-evictWriters <datanode_host:ipc_port>]");
     } else if ("-getDatanodeInfo".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
           + " [-getDatanodeInfo <datanode_host:ipc_port>]");
@@ -2047,6 +2058,8 @@ public class DFSAdmin extends FsShell {
         exitCode = fetchImage(argv, i);
       } else if ("-shutdownDatanode".equals(cmd)) {
         exitCode = shutdownDatanode(argv, i);
+      } else if ("-evictWriters".equals(cmd)) {
+        exitCode = evictWriters(argv, i);
       } else if ("-getDatanodeInfo".equals(cmd)) {
         exitCode = getDatanodeInfo(argv, i);
       } else if ("-reconfig".equals(cmd)) {
@@ -2168,6 +2181,18 @@ public class DFSAdmin extends FsShell {
     }
     dnProxy.shutdownDatanode(upgrade);
     System.out.println("Submitted a shutdown request to datanode " + dn);
+    return 0;
+  }
+
+  private int evictWriters(String[] argv, int i) throws IOException {
+    final String dn = argv[i];
+    ClientDatanodeProtocol dnProxy = getDataNodeProxy(dn);
+    try {
+      dnProxy.evictWriters();
+      System.out.println("Requested writer eviction to datanode " + dn);
+    } catch (IOException ioe) {
+      return -1;
+    }
     return 0;
   }
 

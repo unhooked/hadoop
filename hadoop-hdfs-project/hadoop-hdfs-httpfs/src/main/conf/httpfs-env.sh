@@ -20,7 +20,7 @@
 
 # HTTPFS temporary directory
 #
-# export HTTPFS_TEMP=${HADOOP_PREFIX}/temp
+# export HTTPFS_TEMP=${HADOOP_HOME}/temp
 
 # The HTTP port used by HTTPFS
 #
@@ -38,6 +38,10 @@
 #
 # export HTTPFS_HTTP_HOSTNAME=$(hostname -f)
 
+# The maximum size of Tomcat HTTP header
+#
+# export HTTPFS_MAX_HTTP_HEADER_SIZE=65536
+
 # The location of the SSL keystore if using SSL
 #
 # export HTTPFS_SSL_KEYSTORE_FILE=${HOME}/.keystore
@@ -53,7 +57,7 @@
 #
 # Location of tomcat
 #
-# export HTTPFS_CATALINA_HOME=${HADOOP_PREFIX}/share/hadoop/httpfs/tomcat
+# export HTTPFS_CATALINA_HOME=${HADOOP_HOME}/share/hadoop/httpfs/tomcat
 
 # Java System properties for HTTPFS should be specified in this variable.
 # The java.library.path and hadoop.home.dir properties are automatically

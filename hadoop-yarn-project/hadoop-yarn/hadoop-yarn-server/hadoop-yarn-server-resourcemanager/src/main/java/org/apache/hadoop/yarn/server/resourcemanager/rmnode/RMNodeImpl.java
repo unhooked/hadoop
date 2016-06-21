@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,12 +40,14 @@ import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.net.Node;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.api.protocolrecords.SignalContainerRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -57,6 +60,7 @@ import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
 import org.apache.hadoop.yarn.server.api.protocolrecords.LogAggregationReport;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
+import org.apache.hadoop.yarn.server.api.records.QueuedContainersStatus;
 import org.apache.hadoop.yarn.server.api.records.NodeHealthStatus;
 import org.apache.hadoop.yarn.server.resourcemanager.ClusterMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.NodesListManagerEvent;
@@ -69,6 +73,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppRunningOnNodeEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.AllocationExpirationInfo;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeResourceUpdateSchedulerEvent;
@@ -120,10 +125,14 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
   private long lastHealthReportTime;
   private String nodeManagerVersion;
 
+  private long timeStamp;
   /* Aggregated resource utilization for the containers. */
   private ResourceUtilization containersUtilization;
   /* Resource utilization for the node. */
   private ResourceUtilization nodeUtilization;
+
+  /* Container Queue Information for the node.. Used by Distributed Scheduler */
+  private QueuedContainersStatus queuedContainersStatus;
 
   private final ContainerAllocationExpirer containerAllocationExpirer;
   /* set of containers that have just launched */
@@ -259,6 +268,9 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
 
       .addTransition(NodeState.DECOMMISSIONING, NodeState.DECOMMISSIONING,
           RMNodeEventType.CLEANUP_APP, new CleanUpAppTransition())
+      .addTransition(NodeState.DECOMMISSIONING, NodeState.SHUTDOWN,
+          RMNodeEventType.SHUTDOWN,
+          new DeactivateNodeTransition(NodeState.SHUTDOWN))
 
       // TODO (in YARN-3223) update resource when container finished.
       .addTransition(NodeState.DECOMMISSIONING, NodeState.DECOMMISSIONING,
@@ -346,6 +358,7 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
     this.healthReport = "Healthy";
     this.lastHealthReportTime = System.currentTimeMillis();
     this.nodeManagerVersion = nodeManagerVersion;
+    this.timeStamp = 0;
 
     this.latestNodeHeartBeatResponse.setResponseId(0);
 
@@ -786,8 +799,8 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
       if (previousRMNode != null) {
         rmNode.updateMetricsForRejoinedNode(previousRMNode.getState());
       } else {
-        NodesListManager.UnknownNodeId unknownNodeId =
-            new NodesListManager.UnknownNodeId(nodeId.getHost());
+        NodeId unknownNodeId =
+            NodesListManager.createUnknownNodeId(nodeId.getHost());
         previousRMNode =
             rmNode.context.getInactiveRMNodes().remove(unknownNodeId);
         if (previousRMNode != null) {
@@ -1011,7 +1024,7 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
   }
 
   /**
-   * Put a node in deactivated (decommissioned) status.
+   * Put a node in deactivated (decommissioned or shutdown) status.
    * @param rmNode
    * @param finalState
    */
@@ -1028,6 +1041,9 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
     LOG.info("Deactivating Node " + rmNode.nodeId + " as it is now "
         + finalState);
     rmNode.context.getInactiveRMNodes().put(rmNode.nodeId, rmNode);
+    if (rmNode.context.getNodesListManager().isUntrackedNode(rmNode.hostName)) {
+      rmNode.setUntrackedTimeStamp(Time.monotonicNow());
+    }
   }
 
   /**
@@ -1121,7 +1137,7 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
     public NodeState transition(RMNodeImpl rmNode, RMNodeEvent event) {
 
       RMNodeStatusEvent statusEvent = (RMNodeStatusEvent) event;
-
+      rmNode.setQueuedContainersStatus(statusEvent.getContainerQueueInfo());
       NodeHealthStatus remoteNodeHealthStatus = updateRMNodeFromStatusEvents(
           rmNode, statusEvent);
       NodeState initialState = rmNode.getState();
@@ -1297,6 +1313,7 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
         new ArrayList<ContainerStatus>();
     List<ContainerStatus> completedContainers =
         new ArrayList<ContainerStatus>();
+    int numRemoteRunningContainers = 0;
     for (ContainerStatus remoteContainer : containerStatuses) {
       ContainerId containerId = remoteContainer.getContainerId();
 
@@ -1328,27 +1345,68 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
 
       // Process running containers
       if (remoteContainer.getState() == ContainerState.RUNNING) {
-        if (!launchedContainers.contains(containerId)) {
-          // Just launched container. RM knows about it the first time.
-          launchedContainers.add(containerId);
-          newlyLaunchedContainers.add(remoteContainer);
-          // Unregister from containerAllocationExpirer.
-          containerAllocationExpirer.unregister(
-              new AllocationExpirationInfo(containerId));
+        // Process only GUARANTEED containers in the RM.
+        if (remoteContainer.getExecutionType() == ExecutionType.GUARANTEED) {
+          ++numRemoteRunningContainers;
+          if (!launchedContainers.contains(containerId)) {
+            // Just launched container. RM knows about it the first time.
+            launchedContainers.add(containerId);
+            newlyLaunchedContainers.add(remoteContainer);
+            // Unregister from containerAllocationExpirer.
+            containerAllocationExpirer
+                .unregister(new AllocationExpirationInfo(containerId));
+          }
         }
       } else {
-        // A finished container
-        launchedContainers.remove(containerId);
+        if (remoteContainer.getExecutionType() == ExecutionType.GUARANTEED) {
+          // A finished container
+          launchedContainers.remove(containerId);
+          // Unregister from containerAllocationExpirer.
+          containerAllocationExpirer
+              .unregister(new AllocationExpirationInfo(containerId));
+        }
+        // Completed containers should also include the OPPORTUNISTIC containers
+        // so that the AM gets properly notified.
         completedContainers.add(remoteContainer);
-        // Unregister from containerAllocationExpirer.
-        containerAllocationExpirer.unregister(
-            new AllocationExpirationInfo(containerId));
       }
     }
+    completedContainers.addAll(findLostContainers(
+          numRemoteRunningContainers, containerStatuses));
+
     if (newlyLaunchedContainers.size() != 0 || completedContainers.size() != 0) {
       nodeUpdateQueue.add(new UpdatedContainerInfo(newlyLaunchedContainers,
           completedContainers));
     }
+  }
+
+  private List<ContainerStatus> findLostContainers(int numRemoteRunning,
+      List<ContainerStatus> containerStatuses) {
+    if (numRemoteRunning >= launchedContainers.size()) {
+      return Collections.emptyList();
+    }
+    Set<ContainerId> nodeContainers =
+        new HashSet<ContainerId>(numRemoteRunning);
+    List<ContainerStatus> lostContainers = new ArrayList<ContainerStatus>(
+        launchedContainers.size() - numRemoteRunning);
+    for (ContainerStatus remoteContainer : containerStatuses) {
+      if (remoteContainer.getState() == ContainerState.RUNNING
+          && remoteContainer.getExecutionType() == ExecutionType.GUARANTEED) {
+        nodeContainers.add(remoteContainer.getContainerId());
+      }
+    }
+    Iterator<ContainerId> iter = launchedContainers.iterator();
+    while (iter.hasNext()) {
+      ContainerId containerId = iter.next();
+      if (!nodeContainers.contains(containerId)) {
+        String diag = "Container " + containerId
+            + " was running but not reported from " + nodeId;
+        LOG.warn(diag);
+        lostContainers.add(SchedulerUtils.createAbnormalContainerStatus(
+            containerId, diag));
+        iter.remove();
+      }
+    }
+    return lostContainers;
   }
 
   private void handleLogAggregationStatus(
@@ -1383,4 +1441,35 @@ public class RMNodeImpl implements RMNode, EventHandler<RMNodeEvent> {
   public Resource getOriginalTotalCapability() {
     return this.originalTotalCapability;
   }
- }
+
+  public QueuedContainersStatus getQueuedContainersStatus() {
+    this.readLock.lock();
+
+    try {
+      return this.queuedContainersStatus;
+    } finally {
+      this.readLock.unlock();
+    }
+  }
+
+  public void setQueuedContainersStatus(QueuedContainersStatus
+      queuedContainersStatus) {
+    this.writeLock.lock();
+
+    try {
+      this.queuedContainersStatus = queuedContainersStatus;
+    } finally {
+      this.writeLock.unlock();
+    }
+  }
+
+  @Override
+  public long getUntrackedTimeStamp() {
+    return this.timeStamp;
+  }
+
+  @Override
+  public void setUntrackedTimeStamp(long ts) {
+    this.timeStamp = ts;
+  }
+}

@@ -282,7 +282,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
           PrivilegedOperationExecutor.getInstance(conf);
 
       privilegedOperationExecutor.executePrivilegedOperation(prefixCommands,
-          initializeContainerOp, null, null, false);
+          initializeContainerOp, null, null, false, true);
 
     } catch (PrivilegedOperationException e) {
       int exitCode = e.getExitCode();
@@ -319,7 +319,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     String runAsUser = getRunAsUser(user);
 
     ContainerId containerId = container.getContainerId();
-    String containerIdStr = ConverterUtils.toString(containerId);
+    String containerIdStr = containerId.toString();
 
     resourcesHandler.preExecute(containerId,
             container.getResource());

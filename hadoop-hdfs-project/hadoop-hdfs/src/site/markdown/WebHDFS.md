@@ -65,7 +65,6 @@ WebHDFS REST API
         * [Rename Snapshot](#Rename_Snapshot)
     * [Delegation Token Operations](#Delegation_Token_Operations)
         * [Get Delegation Token](#Get_Delegation_Token)
-        * [Get Delegation Tokens](#Get_Delegation_Tokens)
         * [Renew Delegation Token](#Renew_Delegation_Token)
         * [Cancel Delegation Token](#Cancel_Delegation_Token)
     * [Error Responses](#Error_Responses)
@@ -89,7 +88,6 @@ WebHDFS REST API
         * [RemoteException JSON Schema](#RemoteException_JSON_Schema)
         * [Token JSON Schema](#Token_JSON_Schema)
             * [Token Properties](#Token_Properties)
-        * [Tokens JSON Schema](#Tokens_JSON_Schema)
     * [HTTP Query Parameter Dictionary](#HTTP_Query_Parameter_Dictionary)
         * [ACL Spec](#ACL_Spec)
         * [XAttr Name](#XAttr_Name)
@@ -123,6 +121,7 @@ WebHDFS REST API
         * [Token Kind](#Token_Kind)
         * [Token Service](#Token_Service)
         * [Username](#Username)
+        * [NoRedirect](#NoRedirect)
 
 Document Conventions
 --------------------
@@ -148,7 +147,6 @@ The HTTP REST API supports the complete [FileSystem](../../api/org/apache/hadoop
     * [`GETFILECHECKSUM`](#Get_File_Checksum) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileChecksum)
     * [`GETHOMEDIRECTORY`](#Get_Home_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getHomeDirectory)
     * [`GETDELEGATIONTOKEN`](#Get_Delegation_Token) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getDelegationToken)
-    * [`GETDELEGATIONTOKENS`](#Get_Delegation_Tokens) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getDelegationTokens)
     * [`GETXATTRS`](#Get_an_XAttr) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttr)
     * [`GETXATTRS`](#Get_multiple_XAttrs) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttrs)
     * [`GETXATTRS`](#Get_all_XAttrs) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttrs)
@@ -328,15 +326,21 @@ File and Directory Operations
 
         curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=CREATE
                             [&overwrite=<true |false>][&blocksize=<LONG>][&replication=<SHORT>]
-                            [&permission=<OCTAL>][&buffersize=<INT>]"
+                            [&permission=<OCTAL>][&buffersize=<INT>][&noredirect=<true|false>]"
 
-    The request is redirected to a datanode where the file data is to be written:
+    Usually the request is redirected to a datanode where the file data is to be written.
 
         HTTP/1.1 307 TEMPORARY_REDIRECT
         Location: http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=CREATE...
         Content-Length: 0
 
-* Step 2: Submit another HTTP PUT request using the URL in the `Location` header with the file data to be written.
+    However, if you do not want to be automatically redirected, you can set the noredirect flag.
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        {"Location":"http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=CREATE..."}
+
+* Step 2: Submit another HTTP PUT request using the URL in the `Location` header (or the returned response in case you specified noredirect) with the file data to be written.
 
         curl -i -X PUT -T <LOCAL_FILE> "http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=CREATE..."
 
@@ -354,15 +358,22 @@ See also: [`overwrite`](#Overwrite), [`blocksize`](#Block_Size), [`replication`]
 
 * Step 1: Submit a HTTP POST request without automatically following redirects and without sending the file data.
 
-        curl -i -X POST "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=APPEND[&buffersize=<INT>]"
+        curl -i -X POST "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=APPEND[&buffersize=<INT>][&noredirect=<true|false>]"
 
-    The request is redirected to a datanode where the file data is to be appended:
+    Usually the request is redirected to a datanode where the file data is to be appended:
 
         HTTP/1.1 307 TEMPORARY_REDIRECT
         Location: http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=APPEND...
         Content-Length: 0
 
-* Step 2: Submit another HTTP POST request using the URL in the `Location` header with the file data to be appended.
+   However, if you do not want to be automatically redirected, you can set the noredirect flag.
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        {"Location":"http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=APPEND..."}
+
+
+* Step 2: Submit another HTTP POST request using the URL in the `Location` header (or the returned response in case you specified noredirect) with the file data to be appended.
 
         curl -i -X POST -T <LOCAL_FILE> "http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=APPEND..."
 
@@ -393,13 +404,19 @@ See also: [`sources`](#Sources), [FileSystem](../../api/org/apache/hadoop/fs/Fil
 * Submit a HTTP GET request with automatically following redirects.
 
         curl -i -L "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=OPEN
-                            [&offset=<LONG>][&length=<LONG>][&buffersize=<INT>]"
+                            [&offset=<LONG>][&length=<LONG>][&buffersize=<INT>][&noredirect=<true|false>]"
 
-    The request is redirected to a datanode where the file data can be read:
+    Usually the request is redirected to a datanode where the file data can be read:
 
         HTTP/1.1 307 TEMPORARY_REDIRECT
         Location: http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=OPEN...
         Content-Length: 0
+
+    However if you do not want to be automatically redirected, you can set the noredirect flag.
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        {"Location":"http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=OPEN..."}
 
     The client follows the redirect to the datanode and receives the file data:
 
@@ -621,11 +638,18 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getConten
 
         curl -i "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETFILECHECKSUM"
 
-    The request is redirected to a datanode:
+    Usually the request is redirected to a datanode:
 
         HTTP/1.1 307 TEMPORARY_REDIRECT
         Location: http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=GETFILECHECKSUM...
         Content-Length: 0
+
+    However, if you do not want to be automatically redirected, you can set the noredirect flag.
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        {"Location":"http://<DATANODE>:<PORT>/webhdfs/v1/<PATH>?op=GETFILECHECKSUM..."}
+
 
     The client follows the redirect to the datanode and receives a [`FileChecksum` JSON object](#FileChecksum_JSON_Schema):
 
@@ -1032,32 +1056,6 @@ Delegation Token Operations
         }
 
 See also: [`renewer`](#Renewer), [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getDelegationToken, [`kind`](#Token_Kind), [`service`](#Token_Service)
-
-### Get Delegation Tokens
-
-* Submit a HTTP GET request.
-
-        curl -i "http://<HOST>:<PORT>/webhdfs/v1/?op=GETDELEGATIONTOKENS&renewer=<USER>"
-
-    The client receives a response with a [`Tokens` JSON object](#Tokens_JSON_Schema):
-
-        HTTP/1.1 200 OK
-        Content-Type: application/json
-        Transfer-Encoding: chunked
-
-        {
-          "Tokens":
-          {
-            "Token":
-            [
-              {
-                "urlString":"KAAKSm9i ..."
-              }
-            ]
-          }
-        }
-
-See also: [`renewer`](#Renewer), [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getDelegationTokens
 
 ### Renew Delegation Token
 
@@ -1655,7 +1653,7 @@ See also: [`Token` Properties](#Token_Properties), [`GETDELEGATIONTOKEN`](#Get_D
 
 #### Token Properties
 
-JavaScript syntax is used to define `tokenProperties` so that it can be referred in both `Token` and `Tokens` JSON schemas.
+JavaScript syntax is used to define `tokenProperties` so that it can be referred in `Token` JSON schema.
 
 ```json
 var tokenProperties =
@@ -1673,33 +1671,7 @@ var tokenProperties =
 }
 ```
 
-### Tokens JSON Schema
-
-A `Tokens` JSON object represents an array of `Token` JSON objects.
-
-```json
-{
-  "name"      : "Tokens",
-  "properties":
-  {
-    "Tokens":
-    {
-      "type"      : "object",
-      "properties":
-      {
-        "Token":
-        {
-          "description": "An array of Token",
-          "type"       : "array",
-          "items"      : "Token": tokenProperties      //See Token Properties
-        }
-      }
-    }
-  }
-}
-```
-
-See also: [`Token` Properties](#Token_Properties), [`GETDELEGATIONTOKENS`](#Get_Delegation_Tokens), the note in [Delegation](#Delegation).
+See also: [`Token` Properties](#Token_Properties), the note in [Delegation](#Delegation).
 
 HTTP Query Parameter Dictionary
 -------------------------------
@@ -2013,7 +1985,7 @@ See also: [`RENAME`](#Rename_a_FileDirectory)
 | Valid Values | Any valid username. |
 | Syntax | Any string. |
 
-See also: [`GETDELEGATIONTOKEN`](#Get_Delegation_Token), [`GETDELEGATIONTOKENS`](#Get_Delegation_Tokens)
+See also: [`GETDELEGATIONTOKEN`](#Get_Delegation_Token)
 
 ### Replication
 
@@ -2098,3 +2070,15 @@ See also: [`GETDELEGATIONTOKEN`](#Get_Delegation_Token)
 | Syntax | Any string. |
 
 See also: [Authentication](#Authentication)
+
+### NoRedirect
+
+| Name | `noredirect` |
+|:---- |:---- |
+| Description | Whether the response should return an HTTP 307 redirect or HTTP 200 OK. See [Create and Write to a File](#Create_and_Write_to_a_File). |
+| Type | boolean |
+| Default Value | false |
+| Valid Values | true |
+| Syntax | true |
+
+See also: [Create and Write to a File](#Create_and_Write_to_a_File)

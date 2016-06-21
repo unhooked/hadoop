@@ -39,6 +39,7 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.applications.distributedshell.ApplicationMaster;
@@ -302,7 +303,7 @@ public class HadoopArchiveLogs implements Tool {
         AppInfo app = it.next();
         try {
           ApplicationReport report = client.getApplicationReport(
-              ConverterUtils.toApplicationId(app.getAppId()));
+              ApplicationId.fromString(app.getAppId()));
           LogAggregationStatus aggStatus = report.getLogAggregationStatus();
           if (aggStatus.equals(LogAggregationStatus.RUNNING) ||
               aggStatus.equals(LogAggregationStatus.RUNNING_WITH_FAILURE) ||
@@ -450,7 +451,7 @@ public class HadoopArchiveLogs implements Tool {
   fi
   export HADOOP_CLIENT_OPTS="-Xmx1024m"
   export HADOOP_CLASSPATH=/dist/share/hadoop/tools/lib/hadoop-archive-logs-2.8.0-SNAPSHOT.jar:/dist/share/hadoop/tools/lib/hadoop-archives-2.8.0-SNAPSHOT.jar
-  "$HADOOP_PREFIX"/bin/hadoop org.apache.hadoop.tools.HadoopArchiveLogsRunner -appId "$appId" -user "$user" -workingDir /tmp/logs/archive-logs-work -remoteRootLogDir /tmp/logs -suffix logs
+  "$HADOOP_HOME"/bin/hadoop org.apache.hadoop.tools.HadoopArchiveLogsRunner -appId "$appId" -user "$user" -workingDir /tmp/logs/archive-logs-work -remoteRootLogDir /tmp/logs -suffix logs
    */
   @VisibleForTesting
   void generateScript(File localScript, Path workingDir,
@@ -484,7 +485,7 @@ public class HadoopArchiveLogs implements Tool {
       fw.write("m\"\n");
       fw.write("export HADOOP_CLASSPATH=");
       fw.write(classpath);
-      fw.write("\n\"$HADOOP_PREFIX\"/bin/hadoop ");
+      fw.write("\n\"$HADOOP_HOME\"/bin/hadoop ");
       fw.write(HadoopArchiveLogsRunner.class.getName());
       fw.write(" -appId \"$appId\" -user \"$user\" -workingDir ");
       fw.write(workingDir.toString());

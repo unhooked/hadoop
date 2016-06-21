@@ -77,6 +77,8 @@ import org.codehaus.jackson.node.JsonNodeFactory;
 import org.codehaus.jackson.node.ObjectNode;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.sun.jersey.api.client.ClientHandlerException;
+
 /**
  * The job history events get routed to this class. This class writes the Job
  * history events to the DFS directly into a staging dir and then moved to a
@@ -687,9 +689,9 @@ public class JobHistoryEventHandler extends AbstractService
       NormalizedResourceEvent normalizedResourceEvent = 
             (NormalizedResourceEvent) event;
       if (normalizedResourceEvent.getTaskType() == TaskType.MAP) {
-        summary.setResourcesPerMap(normalizedResourceEvent.getMemory());
+        summary.setResourcesPerMap((int) normalizedResourceEvent.getMemory());
       } else if (normalizedResourceEvent.getTaskType() == TaskType.REDUCE) {
-        summary.setResourcesPerReduce(normalizedResourceEvent.getMemory());
+        summary.setResourcesPerReduce((int) normalizedResourceEvent.getMemory());
       }
       break;  
     case JOB_INITED:
@@ -1032,12 +1034,9 @@ public class JobHistoryEventHandler extends AbstractService
                   + error.getErrorCode());
         }
       }
-    } catch (IOException ex) {
+    } catch (YarnException | IOException | ClientHandlerException ex) {
       LOG.error("Error putting entity " + tEntity.getEntityId() + " to Timeline"
-      + "Server", ex);
-    } catch (YarnException ex) {
-      LOG.error("Error putting entity " + tEntity.getEntityId() + " to Timeline"
-      + "Server", ex);
+          + "Server", ex);
     }
   }
 

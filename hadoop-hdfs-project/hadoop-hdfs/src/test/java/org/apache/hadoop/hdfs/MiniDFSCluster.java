@@ -103,7 +103,6 @@ import org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter.SecureResour
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetUtil;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsVolumeImpl;
 import org.apache.hadoop.hdfs.server.namenode.EditLogFileOutputStream;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
@@ -142,7 +141,8 @@ public class MiniDFSCluster {
   private static final String NAMESERVICE_ID_PREFIX = "nameserviceId";
   private static final Log LOG = LogFactory.getLog(MiniDFSCluster.class);
   /** System property to set the data dir: {@value} */
-  public static final String PROP_TEST_BUILD_DATA = "test.build.data";
+  public static final String PROP_TEST_BUILD_DATA =
+      GenericTestUtils.SYSPROP_TEST_DATA_DIR;
   /** Configuration option to set the data dir: {@value} */
   public static final String HDFS_MINIDFS_BASEDIR = "hdfs.minidfs.basedir";
   public static final String  DFS_NAMENODE_SAFEMODE_EXTENSION_TESTING_KEY
@@ -189,7 +189,8 @@ public class MiniDFSCluster {
     private boolean checkDataNodeHostConfig = false;
     private Configuration[] dnConfOverlays;
     private boolean skipFsyncForTesting = true;
-    
+    private boolean useConfiguredTopologyMappingClass = false;
+
     public Builder(Configuration conf) {
       this.conf = conf;
       this.storagesPerDatanode =
@@ -433,7 +434,14 @@ public class MiniDFSCluster {
       this.skipFsyncForTesting = val;
       return this;
     }
-    
+
+    public Builder useConfiguredTopologyMappingClass(
+        boolean useConfiguredTopologyMappingClass) {
+      this.useConfiguredTopologyMappingClass =
+          useConfiguredTopologyMappingClass;
+      return this;
+    }
+
     /**
      * Construct the actual MiniDFSCluster
      */
@@ -501,7 +509,8 @@ public class MiniDFSCluster {
                        builder.checkDataNodeAddrConfig,
                        builder.checkDataNodeHostConfig,
                        builder.dnConfOverlays,
-                       builder.skipFsyncForTesting);
+                       builder.skipFsyncForTesting,
+                       builder.useConfiguredTopologyMappingClass);
   }
   
   public class DataNodeProperties {
@@ -756,12 +765,13 @@ public class MiniDFSCluster {
                        operation, null, racks, hosts,
                        null, simulatedCapacities, null, true, false,
                        MiniDFSNNTopology.simpleSingleNN(nameNodePort, 0),
-                       true, false, false, null, true);
+                       true, false, false, null, true, false);
   }
 
   private void initMiniDFSCluster(
       Configuration conf,
-      int numDataNodes, StorageType[][] storageTypes, boolean format, boolean manageNameDfsDirs,
+      int numDataNodes, StorageType[][] storageTypes, boolean format,
+      boolean manageNameDfsDirs,
       boolean manageNameDfsSharedDirs, boolean enableManagedDfsDirsRedundancy,
       boolean manageDataDfsDirs, StartupOption startOpt,
       StartupOption dnStartOpt, String[] racks,
@@ -772,7 +782,8 @@ public class MiniDFSCluster {
       boolean checkDataNodeAddrConfig,
       boolean checkDataNodeHostConfig,
       Configuration[] dnConfOverlays,
-      boolean skipFsyncForTesting)
+      boolean skipFsyncForTesting,
+      boolean useConfiguredTopologyMappingClass)
   throws IOException {
     boolean success = false;
     try {
@@ -797,9 +808,11 @@ public class MiniDFSCluster {
           DFS_NAMENODE_SAFEMODE_EXTENSION_TESTING_KEY, 0);
       conf.setInt(DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, safemodeExtension);
       conf.setInt(DFS_NAMENODE_DECOMMISSION_INTERVAL_KEY, 3); // 3 second
-      conf.setClass(NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY, 
-                     StaticMapping.class, DNSToSwitchMapping.class);
-    
+      if (!useConfiguredTopologyMappingClass) {
+        conf.setClass(NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
+            StaticMapping.class, DNSToSwitchMapping.class);
+      }
+
       // In an HA cluster, in order for the StandbyNode to perform checkpoints,
       // it needs to know the HTTP port of the Active. So, if ephemeral ports
       // are chosen, disable checkpoints for the test.
@@ -1259,6 +1272,11 @@ public class MiniDFSCluster {
     if (nn.getHttpsAddress() != null) {
       hdfsConf.set(DFSUtil.addKeySuffixes(DFS_NAMENODE_HTTPS_ADDRESS_KEY,
           nameserviceId, nnId), NetUtils.getHostPortString(nn.getHttpsAddress()));
+    }
+    if (hdfsConf.get(DFS_NAMENODE_LIFELINE_RPC_ADDRESS_KEY) != null) {
+      hdfsConf.set(DFSUtil.addKeySuffixes(DFS_NAMENODE_LIFELINE_RPC_ADDRESS_KEY,
+          nameserviceId, nnId),
+          hdfsConf.get(DFS_NAMENODE_LIFELINE_RPC_ADDRESS_KEY));
     }
     copyKeys(hdfsConf, conf, nameserviceId, nnId);
     DFSUtil.setGenericConf(hdfsConf, nameserviceId, nnId,
@@ -1913,12 +1931,11 @@ public class MiniDFSCluster {
     ShutdownHookManager.get().clearShutdownHooks();
     if (base_dir != null) {
       if (deleteDfsDir) {
-        base_dir.delete();
+        FileUtil.fullyDelete(base_dir);
       } else {
-        base_dir.deleteOnExit();
+        FileUtil.fullyDeleteOnExit(base_dir);
       }
     }
-
   }
   
   /**
@@ -2720,13 +2737,13 @@ public class MiniDFSCluster {
 
   /**
    * Get the base directory for any DFS cluster whose configuration does
-   * not explicitly set it. This is done by retrieving the system property
-   * {@link #PROP_TEST_BUILD_DATA} (defaulting to "build/test/data" ),
-   * and returning that directory with a subdir of /dfs.
+   * not explicitly set it. This is done via
+   * {@link GenericTestUtils#getTestDir()}.
    * @return a directory for use as a miniDFS filesystem.
    */
   public static String getBaseDirectory() {
-    return System.getProperty(PROP_TEST_BUILD_DATA, "build/test/data") + "/dfs/";
+    return GenericTestUtils.getTestDir("dfs").getAbsolutePath()
+        + File.separator;
   }
 
   /**

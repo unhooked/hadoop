@@ -38,6 +38,7 @@ import static org.apache.hadoop.hdfs.util.StripedBlockUtil.StripingChunkReadResu
 import org.apache.hadoop.io.erasurecode.CodecUtil;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 
+import org.apache.hadoop.io.erasurecode.ErasureCoderOptions;
 import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
 import org.apache.hadoop.util.DirectBufferPool;
 
@@ -184,8 +185,10 @@ public class DFSStripedInputStream extends DFSInputStream {
     curStripeRange = new StripeRange(0, 0);
     readingService =
         new ExecutorCompletionService<>(dfsClient.getStripedReadsThreadPool());
-    decoder = CodecUtil.createRSRawDecoder(dfsClient.getConfiguration(),
+    ErasureCoderOptions coderOptions = new ErasureCoderOptions(
         dataBlkNum, parityBlkNum);
+    decoder = CodecUtil.createRawDecoder(dfsClient.getConfiguration(),
+        ecPolicy.getCodecName(), coderOptions);
     if (DFSClient.LOG.isDebugEnabled()) {
       DFSClient.LOG.debug("Creating an striped input stream for file " + src);
     }
@@ -446,9 +449,6 @@ public class DFSStripedInputStream extends DFSInputStream {
           int ret = copyToTargetBuf(strategy, off + result, realLen - result);
           result += ret;
           pos += ret;
-        }
-        if (dfsClient.stats != null) {
-          dfsClient.stats.incrementBytesRead(result);
         }
         return result;
       } finally {

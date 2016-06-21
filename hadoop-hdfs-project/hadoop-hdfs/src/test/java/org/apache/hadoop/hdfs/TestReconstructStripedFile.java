@@ -230,22 +230,23 @@ public class TestReconstructStripedFile {
   private int generateErrors(Map<ExtendedBlock, DataNode> corruptTargets,
       ReconstructionType type)
     throws IOException {
-    int stoppedDN = 0;
-    for (Map.Entry<ExtendedBlock, DataNode> target : corruptTargets.entrySet()) {
-      if (stoppedDN == 0 || type != ReconstructionType.DataOnly
+    int stoppedDNs = 0;
+    for (Map.Entry<ExtendedBlock, DataNode> target :
+        corruptTargets.entrySet()) {
+      if (stoppedDNs == 0 || type != ReconstructionType.DataOnly
           || random.nextBoolean()) {
         // stop at least one DN to trigger reconstruction
         LOG.info("Note: stop DataNode " + target.getValue().getDisplayName()
             + " with internal block " + target.getKey());
         shutdownDataNode(target.getValue());
-        stoppedDN++;
+        stoppedDNs++;
       } else { // corrupt the data on the DN
         LOG.info("Note: corrupt data on " + target.getValue().getDisplayName()
             + " with internal block " + target.getKey());
         cluster.corruptReplica(target.getValue(), target.getKey());
       }
     }
-    return stoppedDN;
+    return stoppedDNs;
   }
 
   /**
@@ -268,7 +269,8 @@ public class TestReconstructStripedFile {
     DFSTestUtil.writeFile(fs, file, data);
     StripedFileTestUtil.waitBlockGroupsReported(fs, fileName);
 
-    LocatedBlocks locatedBlocks = getLocatedBlocks(file);
+    LocatedBlocks locatedBlocks =
+        StripedFileTestUtil.getLocatedBlocks(file, fs);
     assertEquals(locatedBlocks.getFileLength(), fileLen);
 
     LocatedStripedBlock lastBlock =
@@ -324,7 +326,7 @@ public class TestReconstructStripedFile {
     int stoppedDN = generateErrors(errorMap, type);
 
     // Check the locatedBlocks of the file again
-    locatedBlocks = getLocatedBlocks(file);
+    locatedBlocks = StripedFileTestUtil.getLocatedBlocks(file, fs);
     lastBlock = (LocatedStripedBlock)locatedBlocks.getLastLocatedBlock();
     storageInfos = lastBlock.getLocations();
     assertEquals(storageInfos.length, groupSize - stoppedDN);
@@ -337,7 +339,7 @@ public class TestReconstructStripedFile {
       }
     }
 
-    waitForReconstructionFinished(file, groupSize);
+    StripedFileTestUtil.waitForReconstructionFinished(file, fs, groupSize);
 
     targetDNs = sortTargetsByReplicas(blocks, targetDNs);
 
@@ -378,26 +380,6 @@ public class TestReconstructStripedFile {
       }
     }
     return result;
-  }
-
-  private LocatedBlocks waitForReconstructionFinished(Path file, int groupSize)
-      throws Exception {
-    final int ATTEMPTS = 60;
-    for (int i = 0; i < ATTEMPTS; i++) {
-      LocatedBlocks locatedBlocks = getLocatedBlocks(file);
-      LocatedStripedBlock lastBlock =
-          (LocatedStripedBlock)locatedBlocks.getLastLocatedBlock();
-      DatanodeInfo[] storageInfos = lastBlock.getLocations();
-      if (storageInfos.length >= groupSize) {
-        return locatedBlocks;
-      }
-      Thread.sleep(1000);
-    }
-    throw new IOException ("Time out waiting for EC block reconstruction.");
-  }
-
-  private LocatedBlocks getLocatedBlocks(Path file) throws IOException {
-    return fs.getClient().getLocatedBlocks(file.toString(), 0, Long.MAX_VALUE);
   }
 
   /*

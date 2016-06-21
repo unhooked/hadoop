@@ -18,11 +18,16 @@
 
 package org.apache.hadoop.fs.s3a;
 
+import com.amazonaws.ClientConfiguration;
 import com.amazonaws.services.s3.AmazonS3Client;
-import org.apache.commons.lang.StringUtils;
-import com.amazonaws.AmazonClientException;
-import org.apache.hadoop.conf.Configuration;
+import com.amazonaws.services.s3.S3ClientOptions;
 
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang.reflect.FieldUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.contract.ContractTestUtils;
+import org.apache.hadoop.fs.s3native.S3xLoginHelper;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
@@ -30,17 +35,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.net.URI;
-import java.io.IOException;
 
 import org.apache.hadoop.security.ProviderUtils;
 import org.apache.hadoop.security.alias.CredentialProvider;
 import org.apache.hadoop.security.alias.CredentialProviderFactory;
-
+import org.apache.hadoop.util.VersionInfo;
+import org.apache.http.HttpStatus;
 import org.junit.rules.TemporaryFolder;
 
 public class TestS3AConfiguration {
@@ -113,16 +120,15 @@ public class TestS3AConfiguration {
     try {
       fs = S3ATestUtils.createTestFileSystem(conf);
       fail("Expected a connection error for proxy server at " + proxy);
-    } catch (AmazonClientException e) {
-      if (!e.getMessage().contains(proxy + " refused")) {
-        throw e;
-      }
+    } catch (AWSClientIOException e) {
+      // expected
     }
   }
 
   @Test
   public void testProxyPortWithoutHost() throws Exception {
     conf = new Configuration();
+    conf.unset(Constants.PROXY_HOST);
     conf.setInt(Constants.MAX_ERROR_RETRIES, 2);
     conf.setInt(Constants.PROXY_PORT, 1);
     try {
@@ -140,25 +146,22 @@ public class TestS3AConfiguration {
   @Test
   public void testAutomaticProxyPortSelection() throws Exception {
     conf = new Configuration();
+    conf.unset(Constants.PROXY_PORT);
     conf.setInt(Constants.MAX_ERROR_RETRIES, 2);
     conf.set(Constants.PROXY_HOST, "127.0.0.1");
     conf.set(Constants.SECURE_CONNECTIONS, "true");
     try {
       fs = S3ATestUtils.createTestFileSystem(conf);
       fail("Expected a connection error for proxy server");
-    } catch (AmazonClientException e) {
-      if (!e.getMessage().contains("443")) {
-        throw e;
-      }
+    } catch (AWSClientIOException e) {
+      // expected
     }
     conf.set(Constants.SECURE_CONNECTIONS, "false");
     try {
       fs = S3ATestUtils.createTestFileSystem(conf);
       fail("Expected a connection error for proxy server");
-    } catch (AmazonClientException e) {
-      if (!e.getMessage().contains("80")) {
-        throw e;
-      }
+    } catch (AWSClientIOException e) {
+      // expected
     }
   }
 
@@ -208,12 +211,11 @@ public class TestS3AConfiguration {
 
     provisionAccessKeys(conf);
 
-    S3AFileSystem s3afs = new S3AFileSystem();
     conf.set(Constants.ACCESS_KEY, EXAMPLE_ID + "LJM");
-    S3AFileSystem.AWSAccessKeys creds =
-        s3afs.getAWSAccessKeys(new URI("s3a://foobar"), conf);
-    assertEquals("AccessKey incorrect.", EXAMPLE_ID, creds.getAccessKey());
-    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getAccessSecret());
+    S3xLoginHelper.Login creds =
+        S3AUtils.getAWSAccessKeys(new URI("s3a://foobar"), conf);
+    assertEquals("AccessKey incorrect.", EXAMPLE_ID, creds.getUser());
+    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getPassword());
   }
 
   void provisionAccessKeys(final Configuration conf) throws Exception {
@@ -239,13 +241,12 @@ public class TestS3AConfiguration {
 
     provisionAccessKeys(conf);
 
-    S3AFileSystem s3afs = new S3AFileSystem();
     conf.set(Constants.ACCESS_KEY, EXAMPLE_ID + "LJM");
     URI uriWithUserInfo = new URI("s3a://123:456@foobar");
-    S3AFileSystem.AWSAccessKeys creds =
-        s3afs.getAWSAccessKeys(uriWithUserInfo, conf);
-    assertEquals("AccessKey incorrect.", "123", creds.getAccessKey());
-    assertEquals("SecretKey incorrect.", "456", creds.getAccessSecret());
+    S3xLoginHelper.Login creds =
+        S3AUtils.getAWSAccessKeys(uriWithUserInfo, conf);
+    assertEquals("AccessKey incorrect.", "123", creds.getUser());
+    assertEquals("SecretKey incorrect.", "456", creds.getPassword());
   }
 
   @Test
@@ -261,13 +262,12 @@ public class TestS3AConfiguration {
 
     provisionAccessKeys(conf);
 
-    S3AFileSystem s3afs = new S3AFileSystem();
     conf.set(Constants.ACCESS_KEY, EXAMPLE_ID + "LJM");
     URI uriWithUserInfo = new URI("s3a://123@foobar");
-    S3AFileSystem.AWSAccessKeys creds =
-        s3afs.getAWSAccessKeys(uriWithUserInfo, conf);
-    assertEquals("AccessKey incorrect.", "123", creds.getAccessKey());
-    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getAccessSecret());
+    S3xLoginHelper.Login creds =
+        S3AUtils.getAWSAccessKeys(uriWithUserInfo, conf);
+    assertEquals("AccessKey incorrect.", "123", creds.getUser());
+    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getPassword());
   }
 
   @Test
@@ -287,12 +287,11 @@ public class TestS3AConfiguration {
         EXAMPLE_KEY.toCharArray());
     provider.flush();
 
-    S3AFileSystem s3afs = new S3AFileSystem();
     conf.set(Constants.ACCESS_KEY, EXAMPLE_ID);
-    S3AFileSystem.AWSAccessKeys creds =
-        s3afs.getAWSAccessKeys(new URI("s3a://foobar"), conf);
-    assertEquals("AccessKey incorrect.", EXAMPLE_ID, creds.getAccessKey());
-    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getAccessSecret());
+    S3xLoginHelper.Login creds =
+        S3AUtils.getAWSAccessKeys(new URI("s3a://foobar"), conf);
+    assertEquals("AccessKey incorrect.", EXAMPLE_ID, creds.getUser());
+    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getPassword());
   }
 
   @Test
@@ -312,12 +311,11 @@ public class TestS3AConfiguration {
         EXAMPLE_ID.toCharArray());
     provider.flush();
 
-    S3AFileSystem s3afs = new S3AFileSystem();
     conf.set(Constants.SECRET_KEY, EXAMPLE_KEY);
-    S3AFileSystem.AWSAccessKeys creds =
-        s3afs.getAWSAccessKeys(new URI("s3a://foobar"), conf);
-    assertEquals("AccessKey incorrect.", EXAMPLE_ID, creds.getAccessKey());
-    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getAccessSecret());
+    S3xLoginHelper.Login creds =
+        S3AUtils.getAWSAccessKeys(new URI("s3a://foobar"), conf);
+    assertEquals("AccessKey incorrect.", EXAMPLE_ID, creds.getUser());
+    assertEquals("SecretKey incorrect.", EXAMPLE_KEY, creds.getPassword());
   }
 
   @Test
@@ -343,13 +341,89 @@ public class TestS3AConfiguration {
     // using the original config with the s3a provider in the path.
     provisionAccessKeys(c);
 
-    S3AFileSystem s3afs = new S3AFileSystem();
     conf.set(Constants.ACCESS_KEY, EXAMPLE_ID + "LJM");
     URI uriWithUserInfo = new URI("s3a://123:456@foobar");
-    S3AFileSystem.AWSAccessKeys creds =
-        s3afs.getAWSAccessKeys(uriWithUserInfo, conf);
-    assertEquals("AccessKey incorrect.", "123", creds.getAccessKey());
-    assertEquals("SecretKey incorrect.", "456", creds.getAccessSecret());
+    S3xLoginHelper.Login creds =
+        S3AUtils.getAWSAccessKeys(uriWithUserInfo, conf);
+    assertEquals("AccessKey incorrect.", "123", creds.getUser());
+    assertEquals("SecretKey incorrect.", "456", creds.getPassword());
 
+  }
+
+  @Test
+  public void shouldBeAbleToSwitchOnS3PathStyleAccessViaConfigProperty() throws Exception {
+
+    conf = new Configuration();
+    conf.set(Constants.PATH_STYLE_ACCESS, Boolean.toString(true));
+    assertTrue(conf.getBoolean(Constants.PATH_STYLE_ACCESS, false));
+
+    try {
+      fs = S3ATestUtils.createTestFileSystem(conf);
+      assertNotNull(fs);
+      AmazonS3Client s3 = fs.getAmazonS3Client();
+      assertNotNull(s3);
+      S3ClientOptions clientOptions = getField(s3, S3ClientOptions.class,
+          "clientOptions");
+      assertTrue("Expected to find path style access to be switched on!",
+          clientOptions.isPathStyleAccess());
+      byte[] file = ContractTestUtils.toAsciiByteArray("test file");
+      ContractTestUtils.writeAndRead(fs, new Path("/path/style/access/testFile"), file, file.length, conf.getInt(Constants.FS_S3A_BLOCK_SIZE, file.length), false, true);
+    } catch (final AWSS3IOException e) {
+      LOG.error("Caught exception: ", e);
+      // Catch/pass standard path style access behaviour when live bucket
+      // isn't in the same region as the s3 client default. See
+      // http://docs.aws.amazon.com/AmazonS3/latest/dev/VirtualHosting.html
+      assertEquals(e.getStatusCode(), HttpStatus.SC_MOVED_PERMANENTLY);
+    }
+  }
+
+  @Test
+  public void testDefaultUserAgent() throws Exception {
+    conf = new Configuration();
+    fs = S3ATestUtils.createTestFileSystem(conf);
+    assertNotNull(fs);
+    AmazonS3Client s3 = fs.getAmazonS3Client();
+    assertNotNull(s3);
+    ClientConfiguration awsConf = getField(s3, ClientConfiguration.class,
+        "clientConfiguration");
+    assertEquals("Hadoop " + VersionInfo.getVersion(), awsConf.getUserAgent());
+  }
+
+  @Test
+  public void testCustomUserAgent() throws Exception {
+    conf = new Configuration();
+    conf.set(Constants.USER_AGENT_PREFIX, "MyApp");
+    fs = S3ATestUtils.createTestFileSystem(conf);
+    assertNotNull(fs);
+    AmazonS3Client s3 = fs.getAmazonS3Client();
+    assertNotNull(s3);
+    ClientConfiguration awsConf = getField(s3, ClientConfiguration.class,
+        "clientConfiguration");
+    assertEquals("MyApp, Hadoop " + VersionInfo.getVersion(),
+        awsConf.getUserAgent());
+  }
+
+  /**
+   * Reads and returns a field from an object using reflection.  If the field
+   * cannot be found, is null, or is not the expected type, then this method
+   * fails the test.
+   *
+   * @param target object to read
+   * @param fieldType type of field to read, which will also be the return type
+   * @param fieldName name of field to read
+   * @return field that was read
+   * @throws IllegalAccessException if access not allowed
+   */
+  private static <T> T getField(Object target, Class<T> fieldType,
+      String fieldName) throws IllegalAccessException {
+    Object obj = FieldUtils.readField(target, fieldName, true);
+    assertNotNull(String.format(
+        "Could not read field named %s in object with class %s.", fieldName,
+        target.getClass().getName()), obj);
+    assertTrue(String.format(
+        "Unexpected type found for field named %s, expected %s, actual %s.",
+        fieldName, fieldType.getName(), obj.getClass().getName()),
+        fieldType.isAssignableFrom(obj.getClass()));
+    return fieldType.cast(obj);
   }
 }

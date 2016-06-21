@@ -42,7 +42,7 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.FsTracer;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.BlockReader;
-import org.apache.hadoop.hdfs.BlockReaderFactory;
+import org.apache.hadoop.hdfs.client.impl.BlockReaderFactory;
 import org.apache.hadoop.hdfs.ClientContext;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
@@ -523,7 +523,7 @@ public class TestDataNodeVolumeFailure {
                     "test-blockpoolid", block.getBlockId())).
       setBlockToken(lblock.getBlockToken()).
       setStartOffset(0).
-      setLength(-1).
+      setLength(0).
       setVerifyChecksum(true).
       setClientName("TestDataNodeVolumeFailure").
       setDatanodeInfo(datanode).

@@ -178,7 +178,7 @@ public abstract class AbstractYarnScheduler
     NodeFilter nodeFilter = new NodeFilter() {
       @Override
       public boolean accept(SchedulerNode node) {
-        return SchedulerAppUtils.isBlacklisted(app, node, LOG);
+        return SchedulerAppUtils.isPlaceBlacklisted(app, node, LOG);
       }
     };
     return nodeTracker.getNodes(nodeFilter);
@@ -354,14 +354,6 @@ public abstract class AbstractYarnScheduler
         continue;
       }
 
-      // Unmanaged AM recovery is addressed in YARN-1815
-      if (rmApp.getApplicationSubmissionContext().getUnmanagedAM()) {
-        LOG.info("Skip recovering container " + container + " for unmanaged AM."
-            + rmApp.getApplicationId());
-        killOrphanContainerOnNode(nm, container);
-        continue;
-      }
-
       SchedulerApplication<T> schedulerApp = applications.get(appId);
       if (schedulerApp == null) {
         LOG.info("Skip recovering container  " + container
@@ -503,7 +495,7 @@ public abstract class AbstractYarnScheduler
                 "Unauthorized access or invalid container", "Scheduler",
                 "Trying to release container not owned by app "
                     + "or with invalid id.", attempt.getApplicationId(),
-                containerId);
+                containerId, null);
           }
           attempt.getPendingRelease().clear();
         }
@@ -554,7 +546,7 @@ public abstract class AbstractYarnScheduler
             AuditConstants.RELEASE_CONTAINER,
             "Unauthorized access or invalid container", "Scheduler",
             "Trying to release container not owned by app or with invalid id.",
-            attempt.getApplicationId(), containerId);
+            attempt.getApplicationId(), containerId, null);
         }
       }
       completedContainer(rmContainer,
@@ -659,7 +651,7 @@ public abstract class AbstractYarnScheduler
       nodeTracker.removeNode(nm.getNodeID());
 
       // update resource to node
-      node.setTotalResource(newResource);
+      node.updateTotalResource(newResource);
 
       nodeTracker.addNode((N) node);
     } else {

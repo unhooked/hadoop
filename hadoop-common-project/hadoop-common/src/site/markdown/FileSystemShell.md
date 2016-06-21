@@ -27,6 +27,11 @@ Most of the commands in FS shell behave like corresponding Unix commands. Differ
 
 If HDFS is being used, `hdfs dfs` is a synonym.
 
+Relative paths can be used. For HDFS, the current working directory is the
+HDFS home directory `/user/<username>` that often has to be created manually.
+The HDFS home directory can also be implicitly accessed, e.g., when using the
+HDFS trash folder, the `.Trash` directory in the home directory.
+
 See the [Commands Manual](./CommandsManual.html) for generic shell options.
 
 appendToFile
@@ -379,13 +384,14 @@ Return usage output.
 ls
 ----
 
-Usage: `hadoop fs -ls [-C] [-d] [-h] [-R] [-t] [-S] [-r] [-u] <args> `
+Usage: `hadoop fs -ls [-C] [-d] [-h] [-q] [-R] [-t] [-S] [-r] [-u] <args> `
 
 Options:
 
 * -C: Display the paths of files and directories only.
 * -d: Directories are listed as plain files.
 * -h: Format file sizes in a human-readable fashion (eg 64.0m instead of 67108864).
+* -q: Print ? instead of non-printable characters.
 * -R: Recursively list subdirectories encountered.
 * -t: Sort output by modification time (most recent first).
 * -S: Sort output by file size.
@@ -663,7 +669,10 @@ Options:
 * -e: if the path exists, return 0.
 * -f: if the path is a file, return 0.
 * -s: if the path is not empty, return 0.
+* -r: if the path exists and read permission is granted, return 0.
+* -w: if the path exists and write permission is granted, return 0.
 * -z: if the file is zero length, return 0.
+
 
 Example:
 

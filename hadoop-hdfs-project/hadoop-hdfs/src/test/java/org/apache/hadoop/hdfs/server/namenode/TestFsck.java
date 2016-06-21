@@ -24,9 +24,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyLong;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -35,6 +33,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -46,6 +45,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.channels.FileChannel;
 import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,12 +55,15 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.google.common.base.Supplier;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSClient;
@@ -75,6 +79,8 @@ import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.CorruptFileBlocks;
+import org.apache.hadoop.hdfs.protocol.DatanodeAdminProperties;
+import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -84,13 +90,16 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockCollection;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.CombinedHostFileManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.HostConfigManager;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck.Result;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck.ReplicationResult;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck.ErasureCodingResult;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.hdfs.tools.DFSck;
+import org.apache.hadoop.hdfs.util.HostsFileWriter;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.security.AccessControlException;
@@ -101,6 +110,7 @@ import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 import org.apache.log4j.PatternLayout;
 import org.apache.log4j.RollingFileAppender;
+import org.junit.Assert;
 import org.junit.Test;
 
 import com.google.common.collect.Sets;
@@ -109,8 +119,8 @@ import com.google.common.collect.Sets;
  * A JUnit test for doing fsck
  */
 public class TestFsck {
-  static final String auditLogFile = System.getProperty("test.build.dir",
-      "build/test") + "/TestFsck-audit.log";
+  static final String AUDITLOG_FILE =
+      GenericTestUtils.getTempPath("TestFsck-audit.log");
   
   // Pattern for: 
   // allowed=true ugi=name ip=/address cmd=FSCK src=/ dst=null perm=null
@@ -147,7 +157,7 @@ public class TestFsck {
       assertEquals(expectedErrCode, errCode);
     }
     GenericTestUtils.setLogLevel(FSPermissionChecker.LOG, Level.INFO);
-    FSImage.LOG.error("OUTPUT = " + bStream.toString());
+    FSImage.LOG.info("OUTPUT = " + bStream.toString());
     return bStream.toString();
   }
 
@@ -202,14 +212,15 @@ public class TestFsck {
 
   /** Sets up log4j logger for auditlogs */
   private void setupAuditLogs() throws IOException {
-    File file = new File(auditLogFile);
+    File file = new File(AUDITLOG_FILE);
     if (file.exists()) {
       file.delete();
     }
     Logger logger = ((Log4JLogger) FSNamesystem.auditLog).getLogger();
     logger.setLevel(Level.INFO);
     PatternLayout layout = new PatternLayout("%m%n");
-    RollingFileAppender appender = new RollingFileAppender(layout, auditLogFile);
+    RollingFileAppender appender =
+        new RollingFileAppender(layout, AUDITLOG_FILE);
     logger.addAppender(appender);
   }
   
@@ -221,7 +232,7 @@ public class TestFsck {
     BufferedReader reader = null;
     try {
       // Audit log should contain one getfileinfo and one fsck
-      reader = new BufferedReader(new FileReader(auditLogFile));
+      reader = new BufferedReader(new FileReader(AUDITLOG_FILE));
       String line;
 
       // one extra getfileinfo stems from resolving the path
@@ -475,7 +486,25 @@ public class TestFsck {
         }
       }
     }
-    
+
+    public void corruptBlocks(MiniDFSCluster cluster) throws IOException {
+      for (int corruptIdx : blocksToCorrupt) {
+        // Corrupt a block by deleting it
+        ExtendedBlock block = dfsClient.getNamenode().getBlockLocations(name,
+            blockSize * corruptIdx, Long.MAX_VALUE).get(0).getBlock();
+        for (int i = 0; i < numDataNodes; i++) {
+          File blockFile = cluster.getBlockFile(i, block);
+          if(blockFile != null && blockFile.exists()) {
+            FileOutputStream blockFileStream =
+                new FileOutputStream(blockFile, false);
+            blockFileStream.write("corrupt".getBytes());
+            blockFileStream.close();
+            FSImage.LOG.info("Corrupted block file " + blockFile);
+          }
+        }
+      }
+    }
+
     public void checkSalvagedRemains() throws IOException {
       int chainIdx = 0;
       HdfsFileStatus status = dfsClient.getFileInfo(name);
@@ -1888,6 +1917,166 @@ public class TestFsck {
       assertFalse(outStr.contains("/.snapshot/"));
     } finally {
       if (cluster != null) {cluster.shutdown();}
+    }
+  }
+
+  @Test (timeout = 300000)
+  public void testFsckMoveAfterCorruption() throws Exception {
+    final int DFS_BLOCK_SIZE = 512 * 1024;
+    final int NUM_DATANODES = 1;
+    final int REPLICATION = 1;
+    MiniDFSCluster cluster = null;
+    try {
+      final Configuration conf = new HdfsConfiguration();
+      conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DFS_BLOCK_SIZE);
+      conf.setLong(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY, 1000L);
+      conf.setInt(DFSConfigKeys.DFS_DATANODE_DIRECTORYSCAN_INTERVAL_KEY, 1);
+      conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, REPLICATION);
+      cluster = new MiniDFSCluster.Builder(conf).build();
+      DistributedFileSystem dfs = cluster.getFileSystem();
+      cluster.waitActive();
+
+      final String srcDir = "/srcdat";
+      final DFSTestUtil util = new DFSTestUtil.Builder().setName("TestFsck")
+          .setMinSize(DFS_BLOCK_SIZE * 2).setMaxSize(DFS_BLOCK_SIZE * 3)
+          .setNumFiles(1).build();
+      util.createFiles(dfs, srcDir, (short) REPLICATION);
+      final String fileNames[] = util.getFileNames(srcDir);
+      FSImage.LOG.info("Created files: " + Arrays.toString(fileNames));
+
+      // Run fsck here. The output is automatically logged for easier debugging
+      String outStr = runFsck(conf, 0, true, "/", "-files", "-blocks");
+      assertTrue(outStr.contains(NamenodeFsck.HEALTHY_STATUS));
+
+      // Corrupt the first block
+      final DFSClient dfsClient = new DFSClient(
+          new InetSocketAddress("localhost", cluster.getNameNodePort()), conf);
+      final String blockFileToCorrupt = fileNames[0];
+      final CorruptedTestFile ctf = new CorruptedTestFile(blockFileToCorrupt,
+          Sets.newHashSet(0), dfsClient, NUM_DATANODES, DFS_BLOCK_SIZE);
+      ctf.corruptBlocks(cluster);
+
+      // Wait for fsck to discover all the missing blocks
+      GenericTestUtils.waitFor(new Supplier<Boolean>() {
+        @Override
+        public Boolean get() {
+          try {
+            final String str = runFsck(conf, 1, false, "/");
+            String numCorrupt = null;
+            for (String line : str.split(LINE_SEPARATOR)) {
+              Matcher m = numCorruptBlocksPattern.matcher(line);
+              if (m.matches()) {
+                numCorrupt = m.group(1);
+                break;
+              }
+            }
+            if (numCorrupt == null) {
+              Assert.fail("Cannot find corrupt blocks count in fsck output.");
+            }
+            if (Integer.parseInt(numCorrupt) == ctf.getTotalMissingBlocks()) {
+              assertTrue(str.contains(NamenodeFsck.CORRUPT_STATUS));
+              return true;
+            }
+          } catch (Exception e) {
+            FSImage.LOG.error("Exception caught", e);
+            Assert.fail("Caught unexpected exception.");
+          }
+          return false;
+        }
+      }, 1000, 60000);
+
+      runFsck(conf, 1, true, "/", "-files", "-blocks", "-racks");
+      FSImage.LOG.info("Moving blocks to lost+found");
+      // Fsck will return error since we corrupted a block
+      runFsck(conf, 1, false, "/", "-move");
+
+      final List<LocatedFileStatus> retVal = new ArrayList<>();
+      final RemoteIterator<LocatedFileStatus> iter =
+          dfs.listFiles(new Path("/lost+found"), true);
+      while (iter.hasNext()) {
+        retVal.add(iter.next());
+      }
+      FSImage.LOG.info("Items in lost+found: " + retVal);
+
+      // Expect all good blocks moved, only corrupted block skipped.
+      long totalLength = 0;
+      for (LocatedFileStatus lfs: retVal) {
+        totalLength += lfs.getLen();
+      }
+      Assert.assertTrue("Nothing is moved to lost+found!", totalLength > 0);
+      util.cleanup(dfs, srcDir);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test(timeout = 60000)
+  public void testFsckUpgradeDomain() throws Exception {
+    testUpgradeDomain(false, false);
+    testUpgradeDomain(false, true);
+    testUpgradeDomain(true, false);
+    testUpgradeDomain(true, true);
+  }
+
+  private void testUpgradeDomain(boolean defineUpgradeDomain,
+      boolean displayUpgradeDomain) throws Exception {
+    final short replFactor = 1;
+    final short numDN = 1;
+    final long blockSize = 512;
+    final long fileSize = 1024;
+    final String upgradeDomain = "ud1";
+    final String[] racks = {"/rack1"};
+    final String[] hosts = {"127.0.0.1"};
+    HostsFileWriter hostsFileWriter = new HostsFileWriter();
+    Configuration conf = new Configuration();
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    conf.setInt(DFSConfigKeys.DFS_REPLICATION_KEY, replFactor);
+    if (defineUpgradeDomain) {
+      conf.setClass(DFSConfigKeys.DFS_NAMENODE_HOSTS_PROVIDER_CLASSNAME_KEY,
+          CombinedHostFileManager.class, HostConfigManager.class);
+      hostsFileWriter.initialize(conf, "temp/fsckupgradedomain");
+    }
+
+    MiniDFSCluster cluster;
+    DistributedFileSystem dfs;
+    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDN).
+        hosts(hosts).racks(racks).build();
+    cluster.waitClusterUp();
+    dfs = cluster.getFileSystem();
+
+    // Configure the upgrade domain on the datanode
+    if (defineUpgradeDomain) {
+      DatanodeAdminProperties dnProp = new DatanodeAdminProperties();
+      DatanodeID datanodeID = cluster.getDataNodes().get(0).getDatanodeId();
+      dnProp.setHostName(datanodeID.getHostName());
+      dnProp.setPort(datanodeID.getXferPort());
+      dnProp.setUpgradeDomain(upgradeDomain);
+      hostsFileWriter.initIncludeHosts(new DatanodeAdminProperties[]{dnProp});
+      cluster.getFileSystem().refreshNodes();
+    }
+
+    // create files
+    final String testFile = new String("/testfile");
+    final Path path = new Path(testFile);
+    DFSTestUtil.createFile(dfs, path, fileSize, replFactor, 1000L);
+    DFSTestUtil.waitReplication(dfs, path, replFactor);
+    try {
+      String fsckOut = runFsck(conf, 0, true, testFile, "-files", "-blocks",
+          displayUpgradeDomain ? "-upgradedomains" : "-locations");
+      assertTrue(fsckOut.contains(NamenodeFsck.HEALTHY_STATUS));
+      String udValue = defineUpgradeDomain ? upgradeDomain :
+          NamenodeFsck.UNDEFINED;
+      assertEquals(displayUpgradeDomain,
+          fsckOut.contains("(ud=" + udValue + ")"));
+    } finally {
+      if (defineUpgradeDomain) {
+        hostsFileWriter.cleanup();
+      }
+      if (cluster != null) {
+        cluster.shutdown();
+      }
     }
   }
 }

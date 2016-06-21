@@ -23,6 +23,7 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.crypto.CipherSuite;
 import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
+import org.apache.hadoop.hdfs.AddBlockFlag;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileEncryptionInfo;
@@ -81,6 +82,10 @@ class FSDirWriteFileOp {
     BlockInfo uc = fileNode.removeLastBlock(block);
     if (uc == null) {
       return false;
+    }
+    if (uc.getUnderConstructionFeature() != null) {
+      DatanodeStorageInfo.decrementBlocksScheduled(uc
+          .getUnderConstructionFeature().getExpectedStorageLocations());
     }
     fsd.getBlockManager().removeBlockFromMap(uc);
 
@@ -278,8 +283,9 @@ class FSDirWriteFileOp {
   }
 
   static DatanodeStorageInfo[] chooseTargetForNewBlock(
-      BlockManager bm, String src, DatanodeInfo[] excludedNodes, String[]
-      favoredNodes, ValidateAddBlockResult r) throws IOException {
+      BlockManager bm, String src, DatanodeInfo[] excludedNodes,
+      String[] favoredNodes, EnumSet<AddBlockFlag> flags,
+      ValidateAddBlockResult r) throws IOException {
     Node clientNode = bm.getDatanodeManager()
         .getDatanodeByHost(r.clientMachine);
     if (clientNode == null) {
@@ -293,12 +299,11 @@ class FSDirWriteFileOp {
     }
     List<String> favoredNodesList = (favoredNodes == null) ? null
         : Arrays.asList(favoredNodes);
-
     // choose targets for the new block to be allocated.
     return bm.chooseTarget4NewBlock(src, r.numTargets, clientNode,
                                     excludedNodesSet, r.blockSize,
                                     favoredNodesList, r.storagePolicyID,
-                                    r.isStriped);
+                                    r.isStriped, flags);
   }
 
   /**

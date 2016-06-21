@@ -27,6 +27,7 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -35,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSClient;
@@ -49,12 +51,15 @@ import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.test.PathUtils;
 import org.junit.After;
 import org.junit.Assert;
@@ -120,7 +125,7 @@ public class TestDecommissionWithStriped {
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_BLOCKREPORT_INTERVAL_MSEC_KEY,
         BLOCKREPORT_INTERVAL_MSEC);
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_PENDING_TIMEOUT_SEC_KEY,
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_RECONSTRUCTION_PENDING_TIMEOUT_SEC_KEY,
         4);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY,
         NAMENODE_REPLICATION_INTERVAL);
@@ -157,6 +162,13 @@ public class TestDecommissionWithStriped {
   public void testFileFullBlockGroup() throws Exception {
     LOG.info("Starting test testFileFullBlockGroup");
     testDecommission(blockSize * dataBlocks, 9, 1, "testFileFullBlockGroup");
+  }
+
+  @Test(timeout = 120000)
+  public void testFileMultipleBlockGroups() throws Exception {
+    LOG.info("Starting test testFileMultipleBlockGroups");
+    int writeBytes = 2 * blockSize * dataBlocks;
+    testDecommission(writeBytes, 9, 1, "testFileMultipleBlockGroups");
   }
 
   @Test(timeout = 120000)
@@ -265,6 +277,52 @@ public class TestDecommissionWithStriped {
     cleanupFile(dfs, ecFile);
   }
 
+  /**
+   * Tests to verify that the file checksum should be able to compute after the
+   * decommission operation.
+   *
+   * Below is the block indices list after the decommission. ' represents
+   * decommissioned node index.
+   *
+   * 0, 2, 3, 4, 5, 6, 7, 8, 1, 1'
+   *
+   * Here, this list contains duplicated blocks and does not maintaining any
+   * order.
+   */
+  @Test(timeout = 120000)
+  public void testFileChecksumAfterDecommission() throws Exception {
+    LOG.info("Starting test testFileChecksumAfterDecommission");
+
+    final Path ecFile = new Path(ecDir, "testFileChecksumAfterDecommission");
+    int writeBytes = BLOCK_STRIPED_CELL_SIZE * NUM_DATA_BLOCKS;
+    writeStripedFile(dfs, ecFile, writeBytes);
+    Assert.assertEquals(0, bm.numOfUnderReplicatedBlocks());
+    FileChecksum fileChecksum1 = dfs.getFileChecksum(ecFile, writeBytes);
+
+    final List<DatanodeInfo> decommisionNodes = new ArrayList<DatanodeInfo>();
+    LocatedBlock lb = dfs.getClient().getLocatedBlocks(ecFile.toString(), 0)
+        .get(0);
+    DatanodeInfo[] dnLocs = lb.getLocations();
+    assertEquals(NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS, dnLocs.length);
+    int decommNodeIndex = 1;
+
+    // add the node which will be decommissioning
+    decommisionNodes.add(dnLocs[decommNodeIndex]);
+    decommissionNode(0, decommisionNodes, AdminStates.DECOMMISSIONED);
+    assertEquals(decommisionNodes.size(), fsn.getNumDecomLiveDataNodes());
+    assertNull(checkFile(dfs, ecFile, 9, decommisionNodes, numDNs));
+    StripedFileTestUtil.checkData(dfs, ecFile, writeBytes, decommisionNodes,
+        null);
+
+    // verify checksum
+    FileChecksum fileChecksum2 = dfs.getFileChecksum(ecFile, writeBytes);
+    LOG.info("fileChecksum1:" + fileChecksum1);
+    LOG.info("fileChecksum2:" + fileChecksum2);
+
+    Assert.assertTrue("Checksum mismatches!",
+        fileChecksum1.equals(fileChecksum2));
+  }
+
   private void testDecommission(int writeBytes, int storageCount,
       int decomNodeCount, String filename) throws IOException, Exception {
     Path ecFile = new Path(ecDir, filename);
@@ -274,7 +332,15 @@ public class TestDecommissionWithStriped {
 
     int deadDecomissioned = fsn.getNumDecomDeadDataNodes();
     int liveDecomissioned = fsn.getNumDecomLiveDataNodes();
-    ((HdfsDataInputStream) dfs.open(ecFile)).getAllBlocks();
+    List<LocatedBlock> lbs = ((HdfsDataInputStream) dfs.open(ecFile))
+        .getAllBlocks();
+
+    // prepare expected block index and token list.
+    List<HashMap<DatanodeInfo, Byte>> locToIndexList = new ArrayList<>();
+    List<HashMap<DatanodeInfo, Token<BlockTokenIdentifier>>> locToTokenList =
+        new ArrayList<>();
+    prepareBlockIndexAndTokenList(lbs, locToIndexList, locToTokenList);
+
     // Decommission node. Verify that node is decommissioned.
     decommissionNode(0, decommisionNodes, AdminStates.DECOMMISSIONED);
 
@@ -290,7 +356,53 @@ public class TestDecommissionWithStriped {
     assertNull(checkFile(dfs, ecFile, storageCount, decommisionNodes, numDNs));
     StripedFileTestUtil.checkData(dfs, ecFile, writeBytes, decommisionNodes,
         null);
+
+    assertBlockIndexAndTokenPosition(lbs, locToIndexList, locToTokenList);
+
     cleanupFile(dfs, ecFile);
+  }
+
+  private void prepareBlockIndexAndTokenList(List<LocatedBlock> lbs,
+      List<HashMap<DatanodeInfo, Byte>> locToIndexList,
+      List<HashMap<DatanodeInfo, Token<BlockTokenIdentifier>>> locToTokenList) {
+    for (LocatedBlock lb : lbs) {
+      HashMap<DatanodeInfo, Byte> locToIndex = new HashMap<DatanodeInfo, Byte>();
+      locToIndexList.add(locToIndex);
+
+      HashMap<DatanodeInfo, Token<BlockTokenIdentifier>> locToToken =
+          new HashMap<DatanodeInfo, Token<BlockTokenIdentifier>>();
+      locToTokenList.add(locToToken);
+
+      DatanodeInfo[] di = lb.getLocations();
+      LocatedStripedBlock stripedBlk = (LocatedStripedBlock) lb;
+      for (int i = 0; i < di.length; i++) {
+        locToIndex.put(di[i], stripedBlk.getBlockIndices()[i]);
+        locToToken.put(di[i], stripedBlk.getBlockTokens()[i]);
+      }
+    }
+  }
+
+  /**
+   * Verify block index and token values. Must update block indices and block
+   * tokens after sorting.
+   */
+  private void assertBlockIndexAndTokenPosition(List<LocatedBlock> lbs,
+      List<HashMap<DatanodeInfo, Byte>> locToIndexList,
+      List<HashMap<DatanodeInfo, Token<BlockTokenIdentifier>>> locToTokenList) {
+    for (int i = 0; i < lbs.size(); i++) {
+      LocatedBlock lb = lbs.get(i);
+      LocatedStripedBlock stripedBlk = (LocatedStripedBlock) lb;
+      HashMap<DatanodeInfo, Byte> locToIndex = locToIndexList.get(i);
+      HashMap<DatanodeInfo, Token<BlockTokenIdentifier>> locToToken =
+          locToTokenList.get(i);
+      DatanodeInfo[] di = lb.getLocations();
+      for (int j = 0; j < di.length; j++) {
+        Assert.assertEquals("Block index value mismatches after sorting",
+            (byte) locToIndex.get(di[j]), stripedBlk.getBlockIndices()[j]);
+        Assert.assertEquals("Block token value mismatches after sorting",
+            locToToken.get(di[j]), stripedBlk.getBlockTokens()[j]);
+      }
+    }
   }
 
   private List<DatanodeInfo> getDecommissionDatanode(DistributedFileSystem dfs,
@@ -447,7 +559,12 @@ public class TestDecommissionWithStriped {
               return "For block " + blk.getBlock() + " replica on " + nodes[j]
                   + " is given as downnode, " + "but is not decommissioned";
             }
-            // TODO: Add check to verify that the Decommissioned node (if any)
+            // Decommissioned node (if any) should only be last node in list.
+            if (j < repl) {
+              return "For block " + blk.getBlock() + " decommissioned node "
+                  + nodes[j] + " was not last node in list: " + (j + 1) + " of "
+                  + nodes.length;
+            }
             // should only be last node in list.
             LOG.info("Block " + blk.getBlock() + " replica on " + nodes[j]
                 + " is decommissioned.");

@@ -109,7 +109,6 @@ import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.IncreaseContainersReso
 import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.IncreaseContainersResourceResponsePBImpl;
 import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.SubmitApplicationRequestPBImpl;
 import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.SubmitApplicationResponsePBImpl;
-import org.apache.hadoop.yarn.api.records.AMBlackListingRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -121,7 +120,9 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
+import org.apache.hadoop.yarn.api.records.ContainerRetryContext;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.ExecutionTypeRequest;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LogAggregationContext;
 import org.apache.hadoop.yarn.api.records.NMToken;
@@ -153,7 +154,6 @@ import org.apache.hadoop.yarn.api.records.StrictPreemptionContract;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.URL;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
-import org.apache.hadoop.yarn.api.records.impl.pb.AMBlackListingRequestPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationAttemptIdPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationAttemptReportPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationIdPBImpl;
@@ -165,6 +165,7 @@ import org.apache.hadoop.yarn.api.records.impl.pb.ContainerLaunchContextPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ContainerPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ContainerReportPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ContainerResourceChangeRequestPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.ContainerRetryContextPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.ContainerStatusPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.LocalResourcePBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.NMTokenPBImpl;
@@ -187,7 +188,6 @@ import org.apache.hadoop.yarn.api.records.impl.pb.StrictPreemptionContractPBImpl
 import org.apache.hadoop.yarn.api.records.impl.pb.TokenPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.URLPBImpl;
 import org.apache.hadoop.yarn.api.records.impl.pb.YarnClusterMetricsPBImpl;
-import org.apache.hadoop.yarn.proto.YarnProtos.AMBlackListingRequestProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationAttemptIdProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationAttemptReportProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationIdProto;
@@ -199,6 +199,7 @@ import org.apache.hadoop.yarn.proto.YarnProtos.ContainerLaunchContextProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerReportProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerResourceChangeRequestProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ContainerRetryContextProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerStatusProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeIdProto;
@@ -354,7 +355,7 @@ public class TestPBImplRecords {
       return rand.nextBoolean();
     } else if (type.equals(byte.class)) {
       return bytes[rand.nextInt(4)];
-    } else if (type.equals(int.class)) {
+    } else if (type.equals(int.class) || type.equals(Integer.class)) {
       return rand.nextInt(1000000);
     } else if (type.equals(long.class)) {
       return Long.valueOf(rand.nextInt(1000000));
@@ -460,6 +461,7 @@ public class TestPBImplRecords {
         "http", "localhost", 8080, "file0"));
     typeValueCache.put(SerializedException.class,
         SerializedException.newInstance(new IOException("exception for test")));
+    generateByNewInstance(ExecutionTypeRequest.class);
     generateByNewInstance(LogAggregationContext.class);
     generateByNewInstance(ApplicationId.class);
     generateByNewInstance(ApplicationAttemptId.class);
@@ -478,6 +480,7 @@ public class TestPBImplRecords {
     generateByNewInstance(ApplicationResourceUsageReport.class);
     generateByNewInstance(ApplicationReport.class);
     generateByNewInstance(Container.class);
+    generateByNewInstance(ContainerRetryContext.class);
     generateByNewInstance(ContainerLaunchContext.class);
     generateByNewInstance(ApplicationSubmissionContext.class);
     generateByNewInstance(ContainerReport.class);
@@ -509,7 +512,6 @@ public class TestPBImplRecords {
     generateByNewInstance(ResourceAllocationRequest.class);
     generateByNewInstance(ReservationAllocationState.class);
     generateByNewInstance(ResourceUtilization.class);
-    generateByNewInstance(AMBlackListingRequest.class);
   }
 
   private class GetSetPair {
@@ -969,6 +971,12 @@ public class TestPBImplRecords {
   }
 
   @Test
+  public void testContainerRetryPBImpl() throws Exception {
+    validatePBImplRecord(ContainerRetryContextPBImpl.class,
+        ContainerRetryContextProto.class);
+  }
+
+  @Test
   public void testContainerLaunchContextPBImpl() throws Exception {
     validatePBImplRecord(ContainerLaunchContextPBImpl.class,
         ContainerLaunchContextProto.class);
@@ -1342,11 +1350,5 @@ public class TestPBImplRecords {
   public void testCheckForDecommissioningNodesResponsePBImpl() throws Exception {
     validatePBImplRecord(CheckForDecommissioningNodesResponsePBImpl.class,
         CheckForDecommissioningNodesResponseProto.class);
-  }
-
-  @Test
-  public void testAMBlackListingRequestPBImpl() throws Exception {
-    validatePBImplRecord(AMBlackListingRequestPBImpl.class,
-        AMBlackListingRequestProto.class);
   }
 }

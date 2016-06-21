@@ -23,19 +23,31 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.http.HtmlQuoting;
 import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+import org.apache.hadoop.yarn.factories.RecordFactory;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.RMHAUtils;
+import org.apache.hadoop.yarn.webapp.BadRequestException;
+import org.apache.hadoop.yarn.webapp.NotFoundException;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.utils.URLEncodedUtils;
+
+import javax.servlet.http.HttpServletRequest;
 
 @Private
 @Evolving
@@ -377,5 +389,84 @@ public class WebAppUtils {
       password = null;
     }
     return password;
+  }
+
+  public static ApplicationId parseApplicationId(RecordFactory recordFactory,
+      String appId) {
+    if (appId == null || appId.isEmpty()) {
+      throw new NotFoundException("appId, " + appId + ", is empty or null");
+    }
+    ApplicationId aid = null;
+    try {
+      aid = ApplicationId.fromString(appId);
+    } catch (Exception e) {
+      throw new BadRequestException(e);
+    }
+    if (aid == null) {
+      throw new NotFoundException("app with id " + appId + " not found");
+    }
+    return aid;
+  }
+
+  public static String getSupportedLogContentType(String format) {
+    if (format.equalsIgnoreCase("text")) {
+      return "text/plain";
+    } else if (format.equalsIgnoreCase("octet-stream")) {
+      return "application/octet-stream";
+    }
+    return null;
+  }
+
+  public static String getDefaultLogContentType() {
+    return "text/plain";
+  }
+
+  public static List<String> listSupportedLogContentType() {
+    return Arrays.asList("text", "octet-stream");
+  }
+
+  private static String getURLEncodedQueryString(HttpServletRequest request) {
+    String queryString = request.getQueryString();
+    if (queryString != null && !queryString.isEmpty()) {
+      String reqEncoding = request.getCharacterEncoding();
+      if (reqEncoding == null || reqEncoding.isEmpty()) {
+        reqEncoding = "ISO-8859-1";
+      }
+      Charset encoding = Charset.forName(reqEncoding);
+      List<NameValuePair> params = URLEncodedUtils.parse(queryString, encoding);
+      return URLEncodedUtils.format(params, encoding);
+    }
+    return null;
+  }
+
+  /**
+   * Get a HTML escaped uri with the query parameters of the request.
+   * @param request HttpServletRequest with the request details
+   * @return HTML escaped uri with the query paramters
+   */
+  public static String getHtmlEscapedURIWithQueryString(
+      HttpServletRequest request) {
+    String urlEncodedQueryString = getURLEncodedQueryString(request);
+    if (urlEncodedQueryString != null) {
+      return HtmlQuoting.quoteHtmlChars(
+          request.getRequestURI() + "?" + urlEncodedQueryString);
+    }
+    return HtmlQuoting.quoteHtmlChars(request.getRequestURI());
+  }
+
+  /**
+   * Add the query params from a HttpServletRequest to the target uri passed.
+   * @param request HttpServletRequest with the request details
+   * @param targetUri the uri to which the query params must be added
+   * @return URL encoded string containing the targetUri + "?" + query string
+   */
+  public static String appendQueryParams(HttpServletRequest request,
+      String targetUri) {
+    String ret = targetUri;
+    String urlEncodedQueryString = getURLEncodedQueryString(request);
+    if (urlEncodedQueryString != null) {
+      ret += "?" + urlEncodedQueryString;
+    }
+    return ret;
   }
 }

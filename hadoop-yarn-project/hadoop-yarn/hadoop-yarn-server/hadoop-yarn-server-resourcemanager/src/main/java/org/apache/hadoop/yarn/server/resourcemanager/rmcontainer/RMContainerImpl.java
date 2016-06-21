@@ -181,6 +181,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   // Only used for container resource increase and decrease. This is the
   // resource to rollback to should container resource increase token expires.
   private Resource lastConfirmedResource;
+  private volatile String queueName;
 
   public RMContainerImpl(Container container,
       ApplicationAttemptId appAttemptId, NodeId nodeId, String user,
@@ -345,7 +346,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
       logURL.append(WebAppUtils.getHttpSchemePrefix(rmContext
           .getYarnConfiguration()));
       logURL.append(WebAppUtils.getRunningLogURL(
-          container.getNodeHttpAddress(), ConverterUtils.toString(containerId),
+          container.getNodeHttpAddress(), containerId.toString(),
           user));
       return logURL.toString();
     } finally {
@@ -435,7 +436,10 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   
   @Override
   public void handle(RMContainerEvent event) {
-    LOG.debug("Processing " + event.getContainerId() + " of type " + event.getType());
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Processing " + event.getContainerId() + " of type " + event
+              .getType());
+    }
     try {
       writeLock.lock();
       RMContainerState oldState = getState();
@@ -708,7 +712,7 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
           }
         
         long usedMillis = container.finishTime - container.creationTime;
-        long memorySeconds = resource.getMemory()
+        long memorySeconds = resource.getMemorySize()
                               * usedMillis / DateUtils.MILLIS_PER_SECOND;
         long vcoreSeconds = resource.getVirtualCores()
                              * usedMillis / DateUtils.MILLIS_PER_SECOND;
@@ -813,5 +817,14 @@ public class RMContainerImpl implements RMContainer, Comparable<RMContainer> {
   @Override
   public void cancelIncreaseReservation() {
     hasIncreaseReservation = false;
+  }
+
+  public void setQueueName(String queueName) {
+    this.queueName = queueName;
+  }
+
+  @Override
+  public String getQueueName() {
+    return queueName;
   }
 }

@@ -23,6 +23,10 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 
 import java.io.File;
 import java.io.IOException;
@@ -75,6 +79,7 @@ import org.apache.hadoop.yarn.server.security.BaseContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.security.BaseNMTokenSecretManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.iq80.leveldb.DB;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -174,7 +179,6 @@ public class TestNMLeveldbStateStoreService {
     // test empty when no state
     RecoveredApplicationsState state = stateStore.loadApplicationsState();
     assertTrue(state.getApplications().isEmpty());
-    assertTrue(state.getFinishedApplications().isEmpty());
 
     // store an application and verify recovered
     final ApplicationId appId1 = ApplicationId.newInstance(1234, 1);
@@ -188,10 +192,8 @@ public class TestNMLeveldbStateStoreService {
     state = stateStore.loadApplicationsState();
     assertEquals(1, state.getApplications().size());
     assertEquals(appProto1, state.getApplications().get(0));
-    assertTrue(state.getFinishedApplications().isEmpty());
 
-    // finish an application and add a new one
-    stateStore.storeFinishedApplication(appId1);
+    // add a new app
     final ApplicationId appId2 = ApplicationId.newInstance(1234, 2);
     builder = ContainerManagerApplicationProto.newBuilder();
     builder.setId(((ApplicationIdPBImpl) appId2).getProto());
@@ -203,18 +205,13 @@ public class TestNMLeveldbStateStoreService {
     assertEquals(2, state.getApplications().size());
     assertTrue(state.getApplications().contains(appProto1));
     assertTrue(state.getApplications().contains(appProto2));
-    assertEquals(1, state.getFinishedApplications().size());
-    assertEquals(appId1, state.getFinishedApplications().get(0));
 
     // test removing an application
-    stateStore.storeFinishedApplication(appId2);
     stateStore.removeApplication(appId2);
     restartStateStore();
     state = stateStore.loadApplicationsState();
     assertEquals(1, state.getApplications().size());
     assertEquals(appProto1, state.getApplications().get(0));
-    assertEquals(1, state.getFinishedApplications().size());
-    assertEquals(appId1, state.getFinishedApplications().get(0));
   }
 
   @Test
@@ -283,6 +280,18 @@ public class TestNMLeveldbStateStoreService {
     // check whether the new container record is discarded
     assertEquals(1, recoveredContainers.size());
 
+    // queue the container, and verify recovered
+    stateStore.storeContainerQueued(containerId);
+    restartStateStore();
+    recoveredContainers = stateStore.loadContainersState();
+    assertEquals(1, recoveredContainers.size());
+    rcs = recoveredContainers.get(0);
+    assertEquals(RecoveredContainerStatus.QUEUED, rcs.getStatus());
+    assertEquals(ContainerExitStatus.INVALID, rcs.getExitCode());
+    assertEquals(false, rcs.getKilled());
+    assertEquals(containerReq, rcs.getStartRequest());
+    assertTrue(rcs.getDiagnostics().isEmpty());
+
     // launch the container, add some diagnostics, and verify recovered
     StringBuilder diags = new StringBuilder();
     stateStore.storeContainerLaunched(containerId);
@@ -337,6 +346,18 @@ public class TestNMLeveldbStateStoreService {
     assertEquals(containerReq, rcs.getStartRequest());
     assertEquals(diags.toString(), rcs.getDiagnostics());
 
+    // store remainingRetryAttempts, workDir and logDir
+    stateStore.storeContainerRemainingRetryAttempts(containerId, 6);
+    stateStore.storeContainerWorkDir(containerId, "/test/workdir");
+    stateStore.storeContainerLogDir(containerId, "/test/logdir");
+    restartStateStore();
+    recoveredContainers = stateStore.loadContainersState();
+    assertEquals(1, recoveredContainers.size());
+    rcs = recoveredContainers.get(0);
+    assertEquals(6, rcs.getRemainingRetryAttempts());
+    assertEquals("/test/workdir", rcs.getWorkDir());
+    assertEquals("/test/logdir", rcs.getLogDir());
+
     // remove the container and verify not recovered
     stateStore.removeContainer(containerId);
     restartStateStore();
@@ -353,7 +374,7 @@ public class TestNMLeveldbStateStoreService {
     Path appRsrcPath = new Path("hdfs://some/app/resource");
     LocalResourcePBImpl rsrcPb = (LocalResourcePBImpl)
         LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(appRsrcPath),
+            URL.fromPath(appRsrcPath),
             LocalResourceType.ARCHIVE, LocalResourceVisibility.APPLICATION,
             123L, 456L);
     LocalResourceProto appRsrcProto = rsrcPb.getProto();
@@ -386,7 +407,7 @@ public class TestNMLeveldbStateStoreService {
     // start some public and private resources
     Path pubRsrcPath1 = new Path("hdfs://some/public/resource1");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(pubRsrcPath1),
+            URL.fromPath(pubRsrcPath1),
             LocalResourceType.FILE, LocalResourceVisibility.PUBLIC,
             789L, 135L);
     LocalResourceProto pubRsrcProto1 = rsrcPb.getProto();
@@ -395,7 +416,7 @@ public class TestNMLeveldbStateStoreService {
         pubRsrcLocalPath1);
     Path pubRsrcPath2 = new Path("hdfs://some/public/resource2");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(pubRsrcPath2),
+            URL.fromPath(pubRsrcPath2),
             LocalResourceType.FILE, LocalResourceVisibility.PUBLIC,
             789L, 135L);
     LocalResourceProto pubRsrcProto2 = rsrcPb.getProto();
@@ -404,7 +425,7 @@ public class TestNMLeveldbStateStoreService {
         pubRsrcLocalPath2);
     Path privRsrcPath = new Path("hdfs://some/private/resource");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(privRsrcPath),
+            URL.fromPath(privRsrcPath),
             LocalResourceType.PATTERN, LocalResourceVisibility.PRIVATE,
             789L, 680L, "*pattern*");
     LocalResourceProto privRsrcProto = rsrcPb.getProto();
@@ -449,7 +470,7 @@ public class TestNMLeveldbStateStoreService {
     Path appRsrcPath = new Path("hdfs://some/app/resource");
     LocalResourcePBImpl rsrcPb = (LocalResourcePBImpl)
         LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(appRsrcPath),
+            URL.fromPath(appRsrcPath),
             LocalResourceType.ARCHIVE, LocalResourceVisibility.APPLICATION,
             123L, 456L);
     LocalResourceProto appRsrcProto = rsrcPb.getProto();
@@ -489,7 +510,7 @@ public class TestNMLeveldbStateStoreService {
     // start some public and private resources
     Path pubRsrcPath1 = new Path("hdfs://some/public/resource1");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(pubRsrcPath1),
+            URL.fromPath(pubRsrcPath1),
             LocalResourceType.FILE, LocalResourceVisibility.PUBLIC,
             789L, 135L);
     LocalResourceProto pubRsrcProto1 = rsrcPb.getProto();
@@ -498,7 +519,7 @@ public class TestNMLeveldbStateStoreService {
         pubRsrcLocalPath1);
     Path pubRsrcPath2 = new Path("hdfs://some/public/resource2");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(pubRsrcPath2),
+            URL.fromPath(pubRsrcPath2),
             LocalResourceType.FILE, LocalResourceVisibility.PUBLIC,
             789L, 135L);
     LocalResourceProto pubRsrcProto2 = rsrcPb.getProto();
@@ -507,7 +528,7 @@ public class TestNMLeveldbStateStoreService {
         pubRsrcLocalPath2);
     Path privRsrcPath = new Path("hdfs://some/private/resource");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(privRsrcPath),
+            URL.fromPath(privRsrcPath),
             LocalResourceType.PATTERN, LocalResourceVisibility.PRIVATE,
             789L, 680L, "*pattern*");
     LocalResourceProto privRsrcProto = rsrcPb.getProto();
@@ -568,7 +589,7 @@ public class TestNMLeveldbStateStoreService {
     Path appRsrcPath = new Path("hdfs://some/app/resource");
     LocalResourcePBImpl rsrcPb = (LocalResourcePBImpl)
         LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(appRsrcPath),
+            URL.fromPath(appRsrcPath),
             LocalResourceType.ARCHIVE, LocalResourceVisibility.APPLICATION,
             123L, 456L);
     LocalResourceProto appRsrcProto = rsrcPb.getProto();
@@ -598,7 +619,7 @@ public class TestNMLeveldbStateStoreService {
     // add public and private resources and remove some
     Path pubRsrcPath1 = new Path("hdfs://some/public/resource1");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(pubRsrcPath1),
+            URL.fromPath(pubRsrcPath1),
             LocalResourceType.FILE, LocalResourceVisibility.PUBLIC,
             789L, 135L);
     LocalResourceProto pubRsrcProto1 = rsrcPb.getProto();
@@ -614,7 +635,7 @@ public class TestNMLeveldbStateStoreService {
     stateStore.finishResourceLocalization(null, null, pubLocalizedProto1);
     Path pubRsrcPath2 = new Path("hdfs://some/public/resource2");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(pubRsrcPath2),
+            URL.fromPath(pubRsrcPath2),
             LocalResourceType.FILE, LocalResourceVisibility.PUBLIC,
             789L, 135L);
     LocalResourceProto pubRsrcProto2 = rsrcPb.getProto();
@@ -631,7 +652,7 @@ public class TestNMLeveldbStateStoreService {
     stateStore.removeLocalizedResource(null, null, pubRsrcLocalPath2);
     Path privRsrcPath = new Path("hdfs://some/private/resource");
     rsrcPb = (LocalResourcePBImpl) LocalResource.newInstance(
-            ConverterUtils.getYarnUrlFromPath(privRsrcPath),
+            URL.fromPath(privRsrcPath),
             LocalResourceType.PATTERN, LocalResourceVisibility.PRIVATE,
             789L, 680L, "*pattern*");
     LocalResourceProto privRsrcProto = rsrcPb.getProto();
@@ -891,6 +912,26 @@ public class TestNMLeveldbStateStoreService {
     restartStateStore();
     state = stateStore.loadLogDeleterState();
     assertTrue(state.getLogDeleterMap().isEmpty());
+  }
+
+  @Test
+  public void testCompactionCycle() throws IOException {
+    final DB mockdb = mock(DB.class);
+    conf.setInt(YarnConfiguration.NM_RECOVERY_COMPACTION_INTERVAL_SECS, 1);
+    NMLeveldbStateStoreService store = new NMLeveldbStateStoreService() {
+      @Override
+      protected void checkVersion() {}
+
+      @Override
+      protected DB openDatabase(Configuration conf) {
+        return mockdb;
+      }
+    };
+    store.init(conf);
+    store.start();
+    verify(mockdb, timeout(10000)).compactRange(
+        (byte[]) isNull(), (byte[]) isNull());
+    store.close();
   }
 
   private static class NMTokenSecretManagerForTest extends
